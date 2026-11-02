@@ -129,27 +129,19 @@ func TestGCSAuthLazyLookupAndCaching(t *testing.T) {
 
 func TestGCSAuthMissingCredentials(t *testing.T) {
 	var finds atomic.Int32
-	cause := errors.New("could not find default credentials")
-	a := newGCSAuthWithFinder(&finds, nil, cause)
+	a := newGCSAuthWithFinder(&finds, nil, errors.New("could not find default credentials"))
 
 	for range 2 {
 		req := mustRequest(t, "https://storage.googleapis.com/bucket/object")
-		err := a.AddAuth(context.Background(), req)
-		if err == nil {
-			t.Fatal("expected error when no credentials are available")
-		}
-		if !strings.Contains(err.Error(), "gcloud auth application-default login") {
-			t.Errorf("error %q does not tell the user how to fix credentials", err)
-		}
-		if !errors.Is(err, cause) {
-			t.Errorf("error %q does not wrap the lookup error", err)
+		if err := a.AddAuth(context.Background(), req); err != nil {
+			t.Fatalf("AddAuth() error = %v, want nil so the request is sent anonymously", err)
 		}
 		if got := req.Header.Get("Authorization"); got != "" {
-			t.Errorf("Authorization = %q, want empty on failure", got)
+			t.Errorf("Authorization = %q, want empty when no credentials are available", got)
 		}
 	}
 	if finds.Load() != 1 {
-		t.Errorf("credential lookup ran %d times, want 1 (error should be cached)", finds.Load())
+		t.Errorf("credential lookup ran %d times, want 1 (failure should be cached)", finds.Load())
 	}
 }
 
