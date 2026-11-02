@@ -124,6 +124,25 @@ There are multiple possible child elements:
    These keys are a runtime trust anchor only and are never consulted during build-time
    package resolution.
 
+#### Repository authentication
+
+Requests to `storage.googleapis.com` and its subdomains (for example, a repository in a Google Cloud
+Storage bucket) are authenticated with a bearer token minted from
+[Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials).
+Credentials are looked up on the first matching request, and the token is refreshed as needed for the
+rest of the run. Requests to other hosts are not affected.
+
+ - In CI, provide credentials through a workload identity, a service account key file referenced by
+   `GOOGLE_APPLICATION_CREDENTIALS`, or the metadata server when running on Google Cloud.
+ - On a workstation, run `gcloud auth application-default login --scopes=https://www.googleapis.com/auth/devstorage.read_only`.
+   The `--scopes` flag replaces gcloud's default scope list, so these credentials only grant read-only
+   Cloud Storage access. Credentials from a login with the default scopes also work.
+ - If no credentials are found, requests to these hosts are sent without authorization. This is enough
+   for public buckets. Private buckets then fail with an HTTP 401 or 403 error. If credentials are found
+   but the token cannot be obtained, the build fails with an error.
+ - An `HTTP_AUTH` value of the form `basic:<host>:<user>:<password>` for the same host takes precedence
+   over Application Default Credentials.
+
 ### Entrypoint top level element
 
 `entrypoint` defines the default commands and/or services to be executed by the container at runtime.
