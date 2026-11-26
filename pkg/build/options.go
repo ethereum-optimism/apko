@@ -21,11 +21,14 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"chainguard.dev/apko/pkg/apk/apk"
 	"chainguard.dev/apko/pkg/apk/auth"
 	"chainguard.dev/apko/pkg/build/types"
+	"chainguard.dev/apko/pkg/lock"
 	"chainguard.dev/apko/pkg/options"
 	"chainguard.dev/apko/pkg/sbom/generator"
 
@@ -282,6 +285,52 @@ func WithoutDiskCache() Option {
 func WithLockFile(lockFile string) Option {
 	return func(bc *Context) error {
 		bc.o.Lockfile = lockFile
+		return nil
+	}
+}
+
+// WithMarkLocalPackages makes lock record packages that resolve from a local
+// (non-http) repository as local entries carrying only name, version and
+// architecture.
+func WithMarkLocalPackages(mark bool) Option {
+	return func(bc *Context) error {
+		bc.o.MarkLocalPackages = mark
+		return nil
+	}
+}
+
+// WithLocalPackages supplies the accepted whole-file digests of the local
+// packages in the lockfile, as "<name>=sha256:<hex>" entries. A name may be
+// given more than once, for example once per architecture.
+func WithLocalPackages(specs []string) Option {
+	return func(bc *Context) error {
+		if len(specs) == 0 {
+			return nil
+		}
+		pkgs := make(map[string][]string, len(specs))
+		for k, v := range bc.o.LocalPackages {
+			pkgs[k] = slices.Clone(v)
+		}
+		for _, spec := range specs {
+			name, digest, ok := strings.Cut(spec, "=")
+			if !ok || name == "" {
+				return fmt.Errorf("invalid local package %q: expected <name>=sha256:<hex>", spec)
+			}
+			if _, err := lock.ParseSHA256(digest); err != nil {
+				return fmt.Errorf("invalid local package %q: %w", spec, err)
+			}
+			pkgs[name] = append(pkgs[name], strings.ToLower(digest))
+		}
+		bc.o.LocalPackages = pkgs
+		return nil
+	}
+}
+
+// WithRequireStrongChecksums makes a lockfile build fail when a non-local
+// entry of the lock has no whole-file sha256.
+func WithRequireStrongChecksums(require bool) Option {
+	return func(bc *Context) error {
+		bc.o.RequireStrongChecksums = require
 		return nil
 	}
 }

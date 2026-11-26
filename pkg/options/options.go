@@ -81,6 +81,15 @@ type Options struct {
 	Offline                 bool                  `json:"offline,omitempty"`
 	SharedCache             *apk.Cache            `json:"-"`
 	Lockfile                string                `json:"lockfile,omitempty"`
+	// MarkLocalPackages makes lock record packages from local repositories
+	// as local entries, without URL or checksums.
+	MarkLocalPackages bool `json:"markLocalPackages,omitempty"`
+	// LocalPackages maps a package name to the accepted "sha256:<hex>"
+	// digests of its .apk file, for the local entries of Lockfile.
+	LocalPackages map[string][]string `json:"localPackages,omitempty"`
+	// RequireStrongChecksums fails a Lockfile build when a non-local entry
+	// of the lock has no whole-file sha256.
+	RequireStrongChecksums bool `json:"requireStrongChecksums,omitempty"`
 	// PreResolvedPackages, when non-nil, is the exact package set to
 	// install — possibly empty, which installs nothing; nil means the
 	// option is unset and the package set is settled another way.

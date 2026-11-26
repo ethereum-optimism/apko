@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -664,6 +665,35 @@ func (a *APK) InitKeyring(ctx context.Context, keyFiles, extraKeyFiles []string)
 	return eg.Wait()
 }
 
+// InstallKeys installs keys into the APK keyring inside the build context.
+// Each key is a PEM-encoded public key, keyed by the URL or path it was
+// obtained from; it is written under the base name of that location.
+func (a *APK) InstallKeys(ctx context.Context, keys map[string][]byte) error {
+	_, span := otel.Tracer("go-apk").Start(ctx, "InstallKeys")
+	defer span.End()
+
+	if len(keys) == 0 {
+		return nil
+	}
+	if err := a.fs.MkdirAll(DefaultKeyRingPath, 0o755); err != nil {
+		return fmt.Errorf("failed to make keys dir: %w", err)
+	}
+	for _, element := range slices.Sorted(maps.Keys(keys)) {
+		data := keys[element]
+		if int64(len(data)) > maxKeySize {
+			return fmt.Errorf("apk key %s is larger than the %d byte limit", element, maxKeySize)
+		}
+		if err := validatePublicKey(data); err != nil {
+			return fmt.Errorf("apk key %s is not a valid public key: %w", element, err)
+		}
+		// #nosec G306 -- apk keyring must be publicly readable
+		if err := a.fs.WriteFile(filepath.Join("etc", "apk", "keys", filepath.Base(element)), data, 0o644); err != nil {
+			return fmt.Errorf("failed to write apk key: %w", err)
+		}
+	}
+	return nil
+}
+
 // ResolveWorld determine the target state for the requested dependencies in /etc/apk/world. Does not install anything.
 func (a *APK) ResolveWorld(ctx context.Context) (toInstall []*RepositoryPackage, conflicts []string, err error) {
 	log := clog.FromContext(ctx)
@@ -722,7 +752,11 @@ func (a *APK) CalculateWorld(ctx context.Context, allpkgs []*RepositoryPackage) 
 			if err != nil {
 				return fmt.Errorf("expanding %s: %w", pkg.Name, err)
 			}
-			resolved[i] = NewAPKResolved(pkg, expanded)
+			r := NewAPKResolved(pkg, expanded)
+			if r.FileHash, err = FileSHA256(expanded); err != nil {
+				return fmt.Errorf("hashing %s: %w", pkg.Name, err)
+			}
+			resolved[i] = r
 			return nil
 		})
 	}

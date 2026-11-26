@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1" //nolint:gosec // this is what apk tools is using
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -165,6 +166,120 @@ func (d *defaultPackageGetter) expandOptions() []expandapk.Option {
 // If a disk cache is configured, it uses a global singleflight cache to deduplicate
 // concurrent requests across all APK instances in the process.
 func (d *defaultPackageGetter) GetPackage(ctx context.Context, pkg InstallablePackage) (*expandapk.APKExpanded, error) {
+	pinned, isPinned := pkg.(DigestPinnedPackage)
+	if isPinned && (pinned.BypassCache() || pinned.FileSHA256() != nil) {
+		return d.getFilePinnedPackage(ctx, pinned)
+	}
+
+	exp, err := d.getPackage(ctx, pkg)
+	if err != nil || !isPinned {
+		return exp, err
+	}
+	if want := pinned.DataSHA256(); want != nil && !bytes.Equal(want, exp.PackageHash) {
+		return nil, fmt.Errorf("package %q data sha256 mismatch: expected %x, got %x", pkg.PackageName(), want, exp.PackageHash)
+	}
+	return exp, nil
+}
+
+// getFilePinnedPackage serves a package whose whole-file digest is pinned or
+// which must bypass the cache. Such a package is always expanded from the raw
+// .apk into a private directory and verified there; expanded cache entries are
+// neither read nor written for it. When a writable cache is configured and the
+// package came from the network, the verified raw .apk is stored in the cache
+// so later builds, including offline ones, can read it from there.
+func (d *defaultPackageGetter) getFilePinnedPackage(ctx context.Context, pkg DigestPinnedPackage) (*expandapk.APKExpanded, error) {
+	exp, err := d.fetchExpandAndVerify(ctx, pkg, "", d.expandOptions())
+	if err != nil {
+		return nil, err
+	}
+	if d.cache != nil && !d.cache.offline && !pkg.BypassCache() {
+		if err := d.cacheRawPackage(pkg, exp); err != nil {
+			clog.FromContext(ctx).Warnf("unable to cache %s: %v", pkg.PackageName(), err)
+		}
+	}
+	return exp, nil
+}
+
+// cacheRawPackage stores the verified sections of exp as the raw .apk for pkg
+// in the cache, unless the cache already holds one.
+func (d *defaultPackageGetter) cacheRawPackage(pkg InstallablePackage, exp *expandapk.APKExpanded) error {
+	u, err := packageAsURL(pkg)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return nil
+	}
+	dst, err := cachePathFromURL(d.cache.dir, *u)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(dst); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "*.tmp")
+	if err != nil {
+		return err
+	}
+	advertised := false
+	defer func() {
+		if !advertised {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	_ = tmp.Chmod(0o644)
+
+	rc, err := exp.APK()
+	if err != nil {
+		tmp.Close()
+		return err
+	}
+	_, err = io.Copy(tmp, rc)
+	rc.Close()
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if err := paths.AdvertiseCachedFile(tmp.Name(), dst); err != nil {
+		return err
+	}
+	advertised = true
+	return nil
+}
+
+func bypassesCache(pkg FetchablePackage) bool {
+	pinned, ok := pkg.(DigestPinnedPackage)
+	return ok && pinned.BypassCache()
+}
+
+// verifyPinnedDigests checks exp against the digests pinned by pkg.
+func verifyPinnedDigests(pkg DigestPinnedPackage, exp *expandapk.APKExpanded) error {
+	if want := pkg.DataSHA256(); want != nil && !bytes.Equal(want, exp.PackageHash) {
+		return fmt.Errorf("package %q data sha256 mismatch: expected %x, got %x", pkg.PackageName(), want, exp.PackageHash)
+	}
+	if want := pkg.FileSHA256(); want != nil {
+		rc, err := exp.APK()
+		if err != nil {
+			return fmt.Errorf("reading package %q: %w", pkg.PackageName(), err)
+		}
+		defer rc.Close()
+		h := sha256.New()
+		if _, err := io.Copy(h, rc); err != nil {
+			return fmt.Errorf("hashing package %q: %w", pkg.PackageName(), err)
+		}
+		if got := h.Sum(nil); !bytes.Equal(want, got) {
+			return fmt.Errorf("package %q file sha256 mismatch: expected %x, got %x", pkg.PackageName(), want, got)
+		}
+	}
+	return nil
+}
+
+func (d *defaultPackageGetter) getPackage(ctx context.Context, pkg InstallablePackage) (*expandapk.APKExpanded, error) {
 	if d.cache == nil {
 		// If we don't have a cache configured, don't use the global cache.
 		// Calling APKExpanded.Close() will clean up a tempdir.
@@ -316,6 +431,13 @@ func (d *defaultPackageGetter) doFetchExpandAndVerify(ctx context.Context, pkg I
 		return nil, fmt.Errorf("package %q data hash mismatch: expected %x, got %x", pkg.PackageName(), expectedDataHash, exp.PackageHash)
 	}
 
+	if pinned, ok := pkg.(DigestPinnedPackage); ok {
+		if err := verifyPinnedDigests(pinned, exp); err != nil {
+			discard()
+			return nil, err
+		}
+	}
+
 	return exp, nil
 }
 
@@ -360,7 +482,7 @@ func (d *defaultPackageGetter) fetchPackage(ctx context.Context, pkg FetchablePa
 		return f, nil
 	case "https", "http":
 		client := d.client
-		if d.cache != nil {
+		if d.cache != nil && !bypassesCache(pkg) {
 			client = d.cache.client(client, false)
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)

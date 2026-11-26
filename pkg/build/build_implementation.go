@@ -307,7 +307,7 @@ func (bc *Context) buildImage(ctx context.Context) ([]apk.InstalledDiff, error) 
 		if err != nil {
 			return nil, err
 		}
-		allPkgs, err := installablePackagesForArch(lock, bc.Arch())
+		allPkgs, err := installablePackagesForArch(ctx, lock, bc.Arch(), bc.lockInstallOptions())
 		if err != nil {
 			return nil, fmt.Errorf("failed getting packages for install from lockfile %s: %w", bc.o.Lockfile, err)
 		}

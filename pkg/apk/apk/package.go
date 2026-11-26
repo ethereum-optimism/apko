@@ -99,6 +99,19 @@ type InstallablePackage interface {
 	ChecksumString() string
 }
 
+// DigestPinnedPackage is an InstallablePackage that also pins sha256 digests
+// of its content. A nil digest is not checked.
+type DigestPinnedPackage interface {
+	InstallablePackage
+	// DataSHA256 returns the expected sha256 of the compressed data section.
+	DataSHA256() []byte
+	// FileSHA256 returns the expected sha256 of the whole .apk file.
+	FileSHA256() []byte
+	// BypassCache reports whether the package is always read from its URL,
+	// never from or into the disk cache.
+	BypassCache() bool
+}
+
 // PackageInfo represents the information present in .PKGINFO.
 type PackageInfo = types.PackageInfo
 

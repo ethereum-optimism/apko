@@ -44,7 +44,8 @@
           "range": "bytes=1661-2960",
           "checksum": "sha256-zmiHBvaqKHsF8CxQeHa0M4mZKwj7T4T5kRe9VpTkXUw="
         },
-        "checksum": "Q11/HhSewwwOXgl0r0ffb0O0BRtYc="
+        "checksum": "Q11/HhSewwwOXgl0r0ffb0O0BRtYc=",
+        "sha256": "sha256:6c3d3d411237a898280671dc8a41081fb25b791d3b03be75bf39fd31cf32ff49"
       },
       {
         "name": "replayout",
@@ -63,7 +64,8 @@
           "range": "bytes=1656-2954",
           "checksum": "sha256-IMtgng48z5PaYwqYWLrGUKoaZUHFmigOnKRJ7KcmTQo="
         },
-        "checksum": "Q1u62watWiRSQgVtAIuVuYoDOaVO4="
+        "checksum": "Q1u62watWiRSQgVtAIuVuYoDOaVO4=",
+        "sha256": "sha256:b3aaa06e9d43bb37261e0bbb73fe06b41f40e214f8305e77a69358b931f92e86"
       }
     ]
   }

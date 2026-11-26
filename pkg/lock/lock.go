@@ -1,10 +1,13 @@
 package lock
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 
 	"chainguard.dev/apko/pkg/build/types"
 )
@@ -44,7 +47,53 @@ type LockPkg struct {
 	// For data-consistency checks use Signature, Control & Data above.
 	// Populated since Apko 0.13.
 	Checksum string `json:"checksum"`
+	// SHA256 is the sha256 of the whole .apk file, formatted as "sha256:<hex>".
+	SHA256 string `json:"sha256,omitempty"`
+	// Local marks a package that resolved from a local (non-http) repository.
+	// Local packages carry no URL or checksums: their digests are supplied at
+	// build time instead.
+	Local bool `json:"local,omitempty"`
 }
+
+// MarshalJSON writes local packages with only their name, version,
+// architecture and local marker.
+func (p LockPkg) MarshalJSON() ([]byte, error) {
+	if p.Local {
+		return json.Marshal(struct {
+			Name         string `json:"name"`
+			Version      string `json:"version"`
+			Architecture string `json:"architecture"`
+			Local        bool   `json:"local"`
+		}{p.Name, p.Version, p.Architecture, true})
+	}
+	type lockPkg LockPkg
+	return json.Marshal(lockPkg(p))
+}
+
+// SHA256Prefix is the prefix of LockPkg.SHA256 values.
+const SHA256Prefix = "sha256:"
+
+// ParseSHA256 parses a "sha256:<hex>" digest.
+func ParseSHA256(s string) ([]byte, error) {
+	h, ok := strings.CutPrefix(s, SHA256Prefix)
+	if !ok {
+		return nil, fmt.Errorf("digest %q does not start with %q", s, SHA256Prefix)
+	}
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		return nil, fmt.Errorf("digest %q is not hex encoded: %w", s, err)
+	}
+	if len(b) != sha256.Size {
+		return nil, fmt.Errorf("digest %q has %d bytes, expected %d", s, len(b), sha256.Size)
+	}
+	return b, nil
+}
+
+// FormatSHA256 formats a sha256 digest as "sha256:<hex>".
+func FormatSHA256(b []byte) string {
+	return SHA256Prefix + hex.EncodeToString(b)
+}
+
 type LockPkgRangeAndChecksum struct {
 	Range    string `json:"range"`
 	Checksum string `json:"checksum"`
