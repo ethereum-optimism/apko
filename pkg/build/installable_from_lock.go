@@ -34,6 +34,8 @@ type installablePackage struct {
 	local      bool
 }
 
+func (p installablePackage) String() string { return p.name }
+
 func (p installablePackage) URL() string { return p.url }
 
 func (p installablePackage) PackageName() string { return p.name }
