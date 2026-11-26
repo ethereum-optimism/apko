@@ -55,6 +55,8 @@ func publish() *cobra.Command {
 	var cacheDir string
 	var offline bool
 	var lockfile string
+	var localPackages []string
+	var requireStrongChecksums bool
 	var ignoreSignatures bool
 	var format string
 
@@ -121,6 +123,8 @@ in a keychain.`,
 					build.WithAnnotations(annotations),
 					build.WithCache(cacheDir, offline, apk.NewCache(true)),
 					build.WithLockFile(lockfile),
+					build.WithLocalPackages(localPackages),
+					build.WithRequireStrongChecksums(requireStrongChecksums),
 					build.WithTempDir(tmp),
 					build.WithIgnoreSignatures(ignoreSignatures),
 					build.WithFormat(format),
@@ -151,6 +155,8 @@ in a keychain.`,
 	cmd.Flags().StringVar(&cacheDir, "cache-dir", "", "directory to use for caching apk packages and indexes (default '' means to use system-defined cache directory)")
 	cmd.Flags().BoolVar(&offline, "offline", false, "do not use network to fetch packages (cache must be pre-populated)")
 	cmd.Flags().StringVar(&lockfile, "lockfile", "", "a path to .lock.json file (e.g. produced by apko lock) that constraints versions of packages to the listed ones (default '' means no additional constraints)")
+	cmd.Flags().StringArrayVar(&localPackages, "local-package", []string{}, "accepted digest of a local package of the lockfile, as <name>=sha256:<hex> (repeatable); the package is read from the local repositories and must match")
+	cmd.Flags().BoolVar(&requireStrongChecksums, "require-strong-checksums", false, "fail if a non-local package of the lockfile has no sha256")
 	cmd.Flags().BoolVar(&ignoreSignatures, "ignore-signatures", false, "ignore repository signature verification")
 	cmd.Flags().StringVar(&format, "format", "", "layer payload format: 'tar' (default) or 'erofs' (experimental, tracks erofs-image-spec draft)")
 

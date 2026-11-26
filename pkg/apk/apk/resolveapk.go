@@ -26,6 +26,9 @@ type APKResolved struct {
 
 	DataSize int
 	DataHash []byte
+
+	// FileHash is the sha256 of the whole .apk file.
+	FileHash []byte
 }
 
 func ResolveApk(ctx context.Context, source io.Reader) (*APKResolved, error) {
@@ -34,7 +37,9 @@ func ResolveApk(ctx context.Context, source io.Reader) (*APKResolved, error) {
 
 	resolved := &APKResolved{}
 
-	split, err := expandapk.Split(source)
+	fileHash := sha256.New()
+	hashed := io.TeeReader(source, fileHash)
+	split, err := expandapk.Split(hashed)
 	if err != nil {
 		return nil, fmt.Errorf("splitting apk: %w", err)
 	}
@@ -72,7 +77,27 @@ func ResolveApk(ctx context.Context, source io.Reader) (*APKResolved, error) {
 	resolved.DataSize = int(size)
 	resolved.DataHash = dataHash.Sum(nil)
 
+	if _, err := io.Copy(io.Discard, hashed); err != nil {
+		return nil, fmt.Errorf("hashing apk: %w", err)
+	}
+	resolved.FileHash = fileHash.Sum(nil)
+
 	return resolved, nil
+}
+
+// FileSHA256 returns the sha256 of the .apk file that expanded was produced
+// from, computed over its signature, control and data sections in order.
+func FileSHA256(expanded *expandapk.APKExpanded) ([]byte, error) {
+	rc, err := expanded.APK()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, rc); err != nil {
+		return nil, err
+	}
+	return h.Sum(nil), nil
 }
 
 func NewAPKResolved(pkg *RepositoryPackage, expanded *expandapk.APKExpanded) *APKResolved {

@@ -1,10 +1,13 @@
 package lock
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 
 	"chainguard.dev/apko/pkg/build/types"
 )
@@ -33,18 +36,50 @@ type LockContents struct {
 }
 
 type LockPkg struct {
-	Name         string                  `json:"name"`
-	URL          string                  `json:"url"`
+	Name string `json:"name"`
+	// URL is empty for local packages.
+	URL          string                  `json:"url,omitempty"`
 	Version      string                  `json:"version"`
 	Architecture string                  `json:"architecture"`
-	Signature    LockPkgRangeAndChecksum `json:"signature"`
-	Control      LockPkgRangeAndChecksum `json:"control"`
-	Data         LockPkgRangeAndChecksum `json:"data"`
+	Signature    LockPkgRangeAndChecksum `json:"signature,omitzero"`
+	Control      LockPkgRangeAndChecksum `json:"control,omitzero"`
+	Data         LockPkgRangeAndChecksum `json:"data,omitzero"`
 	// Checksum is APK-style: 'Q1' prefixed SHA1 hash of the second gzip stream (control stream) in the package.
 	// For data-consistency checks use Signature, Control & Data above.
 	// Populated since Apko 0.13.
-	Checksum string `json:"checksum"`
+	Checksum string `json:"checksum,omitempty"`
+	// SHA256 is the sha256 of the whole .apk file, formatted as "sha256:<hex>".
+	SHA256 string `json:"sha256,omitempty"`
+	// Local marks a package that resolved from a local (non-http) repository.
+	// Local packages carry no URL or checksums: their digests are supplied at
+	// build time instead.
+	Local bool `json:"local,omitempty"`
 }
+
+// SHA256Prefix is the prefix of LockPkg.SHA256 values.
+const SHA256Prefix = "sha256:"
+
+// ParseSHA256 parses a "sha256:<hex>" digest.
+func ParseSHA256(s string) ([]byte, error) {
+	h, ok := strings.CutPrefix(s, SHA256Prefix)
+	if !ok {
+		return nil, fmt.Errorf("digest %q does not start with %q", s, SHA256Prefix)
+	}
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		return nil, fmt.Errorf("digest %q is not hex encoded: %w", s, err)
+	}
+	if len(b) != sha256.Size {
+		return nil, fmt.Errorf("digest %q has %d bytes, expected %d", s, len(b), sha256.Size)
+	}
+	return b, nil
+}
+
+// FormatSHA256 formats a sha256 digest as "sha256:<hex>".
+func FormatSHA256(b []byte) string {
+	return SHA256Prefix + hex.EncodeToString(b)
+}
+
 type LockPkgRangeAndChecksum struct {
 	Range    string `json:"range"`
 	Checksum string `json:"checksum"`

@@ -89,7 +89,8 @@
           "range": "bytes=1629-2929",
           "checksum": "sha256-ckBapsaMu5EOb/e4Ei1s2l/+dZMEamHhUmaoJ8yeZwg="
         },
-        "checksum": "Q1m6wB0UFePGN8Drz82pC8y2uAiu8="
+        "checksum": "Q1m6wB0UFePGN8Drz82pC8y2uAiu8=",
+        "sha256": "sha256:7771da1b81d8d688a3cd2f593bdff7577b52069c40f8460868c68cf257420a42"
       },
       {
         "name": "replayout",
@@ -108,7 +109,8 @@
           "range": "bytes=1661-2960",
           "checksum": "sha256-zmiHBvaqKHsF8CxQeHa0M4mZKwj7T4T5kRe9VpTkXUw="
         },
-        "checksum": "Q11/HhSewwwOXgl0r0ffb0O0BRtYc="
+        "checksum": "Q11/HhSewwwOXgl0r0ffb0O0BRtYc=",
+        "sha256": "sha256:6c3d3d411237a898280671dc8a41081fb25b791d3b03be75bf39fd31cf32ff49"
       },
       {
         "name": "pretend-baselayout",
@@ -127,7 +129,8 @@
           "range": "bytes=1629-2929",
           "checksum": "sha256-cY5bE593kEpYKyqepLmkPc/RnAiPsIsm92XAHwi+U9I="
         },
-        "checksum": "Q1JQ8nfsxa27d0f6oa056sdT5IcJY="
+        "checksum": "Q1JQ8nfsxa27d0f6oa056sdT5IcJY=",
+        "sha256": "sha256:e52c8de8b0baf2a1957f79e4f077e488aa72a65eceb7c36bc170339b0428c585"
       },
       {
         "name": "replayout",
@@ -146,7 +149,8 @@
           "range": "bytes=1656-2954",
           "checksum": "sha256-IMtgng48z5PaYwqYWLrGUKoaZUHFmigOnKRJ7KcmTQo="
         },
-        "checksum": "Q1u62watWiRSQgVtAIuVuYoDOaVO4="
+        "checksum": "Q1u62watWiRSQgVtAIuVuYoDOaVO4=",
+        "sha256": "sha256:b3aaa06e9d43bb37261e0bbb73fe06b41f40e214f8305e77a69358b931f92e86"
       }
     ]
   }

@@ -21,6 +21,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/apimachinery/pkg/util/sets"
+
+	"chainguard.dev/apko/pkg/lock"
 )
 
 func (bc *Context) postBuildSetApk(ctx context.Context) error {
@@ -65,6 +67,12 @@ func (bc *Context) initializeApk(ctx context.Context) error {
 
 	eg.Go(func() error {
 		keyring := sets.List(sets.New(bc.ic.Contents.Keyring...).Insert(bc.o.ExtraKeyFiles...))
+		if bc.o.Lockfile != "" {
+			var err error
+			if keyring, err = bc.installLockedKeys(ctx, keyring); err != nil {
+				return fmt.Errorf("failed to initialize apk keyring from lockfile: %w", err)
+			}
+		}
 		if err := bc.apk.InitKeyring(ctx, keyring, nil); err != nil {
 			return fmt.Errorf("failed to initialize apk keyring: %w", err)
 		}
@@ -104,4 +112,33 @@ func (bc *Context) initializeApk(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// installLockedKeys installs the keys of keyring whose content is embedded in
+// the lockfile, and returns the keys that still have to be fetched.
+func (bc *Context) installLockedKeys(ctx context.Context, keyring []string) ([]string, error) {
+	l, err := lock.FromFile(bc.o.Lockfile)
+	if err != nil {
+		return nil, err
+	}
+	content := make(map[string]string, len(l.Contents.Keyrings))
+	for _, k := range l.Contents.Keyrings {
+		if k.Content != "" {
+			content[k.URL] = k.Content
+		}
+	}
+
+	keys := map[string][]byte{}
+	var remaining []string
+	for _, k := range keyring {
+		if c, ok := content[k]; ok {
+			keys[k] = []byte(c)
+		} else {
+			remaining = append(remaining, k)
+		}
+	}
+	if err := bc.apk.InstallKeys(ctx, keys); err != nil {
+		return nil, err
+	}
+	return remaining, nil
 }
