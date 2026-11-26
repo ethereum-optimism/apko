@@ -124,3 +124,37 @@ func TestRemoveLabel(t *testing.T) {
 		})
 	}
 }
+
+func TestGenerateLockMatchesLockCmd(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name   string
+		config string
+		paths  []string
+		golden string
+	}{
+		{name: "apko", config: "apko.yaml", paths: []string{"testdata"}, golden: "apko.lock.json"},
+		{name: "base image", config: filepath.Join("testdata", "image_on_top.apko.yaml"), golden: "image_on_top.apko.lock.json"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			archs := types.ParseArchitectures([]string{"amd64", "arm64"})
+			opts := []build.Option{build.WithConfig(tt.config, tt.paths)}
+
+			l, err := build.GenerateLock(ctx, archs, withIsolatedDirs(t, opts...))
+			require.NoError(t, err)
+
+			outputPath := filepath.Join(t.TempDir(), "lock.json")
+			require.NoError(t, l.SaveToFile(outputPath))
+
+			want, err := os.ReadFile(filepath.Join("testdata", tt.golden))
+			require.NoError(t, err)
+			got, err := os.ReadFile(outputPath)
+			require.NoError(t, err)
+			if diff := cmp.Diff(string(want), string(got)); diff != "" {
+				t.Errorf("GenerateLock content differs from %s (-want +got):\n%s", tt.golden, diff)
+			}
+		})
+	}
+}
