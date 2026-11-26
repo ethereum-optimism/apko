@@ -1,65 +1,68 @@
-project_name: apko
 version: 2
+
+project_name: op-apko
 
 before:
   hooks:
-    - go mod download
-
-env:
-  - COSIGN_YES=true
+    - go mod verify
 
 builds:
-- id: apko-build
-  binary: apko
-  main: ./
-  env:
-  - CGO_ENABLED=0
-  goos:
-    - darwin
-    - linux
-  goarch:
-    - "386"
-    - amd64
-    - arm64
-    - ppc64le
-    - riscv64
-    - s390x
-  ignore:
-    - goos: darwin
-      goarch: "386"
-  flags:
-    - -trimpath
-  mod_timestamp: '{{ .CommitTimestamp }}'
-  ldflags:
-    - -extldflags "-static"
-    - "{{ .Env.LDFLAGS }}"
-
-signs:
-  - id: apko-cosign
-    cmd: cosign
-    certificate: "${artifact}.crt"
-    args: ["sign-blob", "--output-signature", "${signature}", "--output-certificate", "${certificate}", "${artifact}", "--yes"]
-    artifacts: all
+  - id: op-apko
+    binary: op-apko
+    main: ./
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w -buildid=
+      - -extldflags "-static"
+      - -X sigs.k8s.io/release-utils/version.gitVersion={{ .Tag }}
+      - -X sigs.k8s.io/release-utils/version.gitCommit={{ .FullCommit }}
+      - -X sigs.k8s.io/release-utils/version.gitTreeState=clean
+      - -X sigs.k8s.io/release-utils/version.buildDate={{ .CommitDate }}
 
 archives:
-- files:
-    - LICENSE
-  wrap_in_directory: true
+  - id: op-apko
+    ids:
+      - op-apko
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
 
 checksum:
-  name_template: 'checksums.txt'
+  name_template: checksums.txt
+  algorithm: sha256
 
-snapshot:
-  version_template: "{{ .Tag }}-next"
+sboms:
+  - id: archive
+    artifacts: archive
+    documents:
+      - "{{ .ArtifactName }}.sbom.json"
+    cmd: syft
+    env:
+      - SYFT_CHECK_FOR_APP_UPDATE=false
+    args:
+      - "$artifact"
+      - "--output"
+      - "spdx-json=$document"
 
 changelog:
-  sort: asc
-  filters:
-    exclude:
-    - '^docs:'
-    - '^test:'
+  disable: true
 
 release:
   draft: false
-  prerelease: false
-  name_template: "Release {{ .Tag }}"
+  prerelease: "false"
