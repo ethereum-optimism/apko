@@ -36,24 +36,38 @@ type LockContents struct {
 }
 
 type LockPkg struct {
-	Name string `json:"name"`
-	// URL is empty for local packages.
-	URL          string                  `json:"url,omitempty"`
+	Name         string                  `json:"name"`
+	URL          string                  `json:"url"`
 	Version      string                  `json:"version"`
 	Architecture string                  `json:"architecture"`
-	Signature    LockPkgRangeAndChecksum `json:"signature,omitzero"`
-	Control      LockPkgRangeAndChecksum `json:"control,omitzero"`
-	Data         LockPkgRangeAndChecksum `json:"data,omitzero"`
+	Signature    LockPkgRangeAndChecksum `json:"signature"`
+	Control      LockPkgRangeAndChecksum `json:"control"`
+	Data         LockPkgRangeAndChecksum `json:"data"`
 	// Checksum is APK-style: 'Q1' prefixed SHA1 hash of the second gzip stream (control stream) in the package.
 	// For data-consistency checks use Signature, Control & Data above.
 	// Populated since Apko 0.13.
-	Checksum string `json:"checksum,omitempty"`
+	Checksum string `json:"checksum"`
 	// SHA256 is the sha256 of the whole .apk file, formatted as "sha256:<hex>".
 	SHA256 string `json:"sha256,omitempty"`
 	// Local marks a package that resolved from a local (non-http) repository.
 	// Local packages carry no URL or checksums: their digests are supplied at
 	// build time instead.
 	Local bool `json:"local,omitempty"`
+}
+
+// MarshalJSON writes local packages with only their name, version,
+// architecture and local marker.
+func (p LockPkg) MarshalJSON() ([]byte, error) {
+	if p.Local {
+		return json.Marshal(struct {
+			Name         string `json:"name"`
+			Version      string `json:"version"`
+			Architecture string `json:"architecture"`
+			Local        bool   `json:"local"`
+		}{p.Name, p.Version, p.Architecture, true})
+	}
+	type lockPkg LockPkg
+	return json.Marshal(lockPkg(p))
 }
 
 // SHA256Prefix is the prefix of LockPkg.SHA256 values.
