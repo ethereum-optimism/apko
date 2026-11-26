@@ -4,6 +4,8 @@
 them, per architecture, to a lock file (`<config>.lock.json` by default).
 `apko build --lockfile <file>` and `apko publish --lockfile <file>` then
 install exactly the locked packages without consulting any APKINDEX.
+Programs that use apko as a library can produce the same content with
+`build.GenerateLock`.
 
 ## Package entries
 
