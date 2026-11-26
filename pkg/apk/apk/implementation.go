@@ -861,6 +861,7 @@ func (a *APK) InstallPackages(ctx context.Context, sourceDateEpoch *time.Time, a
 	g.SetLimit(jobs + 1)
 
 	expanded := make([]*expandapk.APKExpanded, len(allpkgs))
+	expandErrs := make([]error, len(allpkgs))
 
 	// Track what files were installed by which packages so we can deduplicate in idb.
 	allFiles := make([][]tar.Header, len(allpkgs))
@@ -887,6 +888,9 @@ func (a *APK) InstallPackages(ctx context.Context, sourceDateEpoch *time.Time, a
 				pkg := allpkgs[i]
 
 				if exp == nil {
+					if err := expandErrs[i]; err != nil {
+						return err
+					}
 					return fmt.Errorf("expansion of %s failed", pkg)
 				}
 
@@ -926,10 +930,12 @@ func (a *APK) InstallPackages(ctx context.Context, sourceDateEpoch *time.Time, a
 			defer func() { close(done[i]) }()
 			exp, err := a.packageGetter.GetPackage(ctx, pkg)
 			if err != nil {
-				return fmt.Errorf("expanding %s: %w", pkg, err)
+				expandErrs[i] = fmt.Errorf("expanding %s: %w", pkg, err)
+				return expandErrs[i]
 			}
 			if err := VerifyPinnedDigests(pkg, exp); err != nil {
-				return fmt.Errorf("verifying %s: %w", pkg, err)
+				expandErrs[i] = fmt.Errorf("verifying %s: %w", pkg, err)
+				return expandErrs[i]
 			}
 
 			expanded[i] = exp
