@@ -39,16 +39,35 @@ warning, and are verified by their SHA-1 based `checksum` only. Pass
 has no `sha256`.
 
 A package with a `sha256` is always expanded from its `.apk` file, read from
-the network or from the raw `.apk` in the cache directory; expanded cache
-entries are not used for it. Builds that are not `--offline` store the
-verified `.apk` in the cache, so a later `--offline --cache-dir` build can
-install it without network access.
+the network or from the raw `.apk` in the cache directory. Builds that are not
+`--offline` store the verified `.apk` in the cache, so a later
+`--offline --cache-dir` build can install it without network access. When an
+online build finds a raw `.apk` in the cache that fails verification, it
+removes it and fetches the package again from the network; an `--offline`
+build fails instead. An `--offline` build whose cache has no raw `.apk` for a
+package, only its expanded entry (for example a cache warmed by an older
+apko), installs it from the expanded entry when its signature, control and
+data sections together match `sha256`.
+
+These checks also apply when apko is used as a library with a custom
+`PackageGetter`: every package the getter returns is checked against
+`data.checksum` and `sha256`.
+
+`apko lock` computes `sha256` from a verified `.apk` file: the raw `.apk` in
+the cache when its APK checksum and `datahash` verify, and otherwise the file
+fetched from the network. It never computes it from expanded cache entries.
+An offline `apko lock` whose cache holds no raw `.apk` for a package writes no
+`sha256` for it.
 
 ## Keyring
 
-The lock file embeds the content of every keyring entry. A `--lockfile` build
-installs the configured keys from that content instead of fetching them, and
-only fetches a key whose content is missing from the lock file.
+The lock file embeds the content of every keyring entry, including keys added
+with `--keyring-append`. A `--lockfile` build installs the configured and
+appended keys from that content instead of fetching them. A key whose content
+is missing from the lock file is fetched with a warning, or fails the build
+with `--require-strong-checksums`. Two keyring entries that would be written
+to the same file under `/etc/apk/keys` fail the build when either of them
+comes from the lock file.
 
 ## Local packages
 
@@ -76,10 +95,15 @@ apko build image.yaml example:latest image.tar \
   --local-package my-tool=sha256:$(sha256sum packages/x86_64/my-tool-1.2.3-r0.apk | cut -d' ' -f1)
 ```
 
-For each local entry apko reads `<repository>/<architecture>/<name>-<version>.apk`
-from the first local repository (configured or appended) that has it, checks
-its sha256 against the digests given for that name, and checks that its
-`.PKGINFO` names the locked package, version and architecture. Local packages
+For each local entry apko searches the local repositories in order
+(configured build repositories, configured repositories, then appended ones)
+for `<repository>/<architecture>/<name>-<version>.apk` and uses the first file
+whose sha256 matches one of the digests given for that name. It hashes a file
+before expanding it, so a file with another digest is skipped without being
+read further. It then checks that the `.PKGINFO` names the locked package,
+version and architecture. A local entry whose name, version or architecture
+contains `/`, `\`, `..` or NUL, or is not a single clean path component, is
+rejected. Local packages
 never go through the cache. The build fails when the flag is missing, the file
 is missing, or the digest, name, version or architecture does not match. A
 name may be given several times, for example once per architecture. A

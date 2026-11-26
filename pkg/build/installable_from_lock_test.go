@@ -19,10 +19,12 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 
@@ -272,8 +274,8 @@ func TestBuildFromLockOffline(t *testing.T) {
 		tamper:     true,
 		wantErr:    "file sha256 mismatch",
 	}, {
-		name:    "keyring without embedded content is fetched",
-		wantErr: "failed to initialize apk keyring",
+		name:    "keyring without embedded content with strong checksums required",
+		wantErr: "have no content embedded in the lock file",
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -314,6 +316,214 @@ func TestBuildFromLockOffline(t *testing.T) {
 			installed, err := bc.APK().GetInstalled()
 			require.NoError(t, err)
 			require.Len(t, installed, len(pkgs))
+		})
+	}
+}
+
+func TestResolveLocalPackagePathTraversal(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "x86_64"), 0o755))
+	b, err := os.ReadFile(filepath.Join(testPackagesDir, "packages", "x86_64", "pretend-baselayout-1.0.0-r0.apk"))
+	require.NoError(t, err)
+	outside := filepath.Join(root, "pretend-baselayout-1.0.0-r0.apk")
+	require.NoError(t, os.WriteFile(outside, b, 0o644)) //nolint:gosec // test fixture
+	digest := apkDigest(t, outside)
+
+	tests := []struct {
+		name    string
+		pkg     lock.LockPkg
+		wantErr string
+	}{{
+		name:    "architecture escapes the repository",
+		pkg:     lock.LockPkg{Name: "pretend-baselayout", Version: "1.0.0-r0", Architecture: "..", Local: true},
+		wantErr: "invalid architecture",
+	}, {
+		name:    "name with a slash",
+		pkg:     lock.LockPkg{Name: "../pretend-baselayout", Version: "1.0.0-r0", Architecture: "x86_64", Local: true},
+		wantErr: "invalid name",
+	}, {
+		name:    "version with a backslash",
+		pkg:     lock.LockPkg{Name: "pretend-baselayout", Version: "1.0.0-r0\\x", Architecture: "x86_64", Local: true},
+		wantErr: "invalid version",
+	}, {
+		name:    "version with a NUL",
+		pkg:     lock.LockPkg{Name: "pretend-baselayout", Version: "1.0.0-r0\x00", Architecture: "x86_64", Local: true},
+		wantErr: "invalid version",
+	}, {
+		name:    "version with dot dot",
+		pkg:     lock.LockPkg{Name: "pretend-baselayout", Version: "1..0", Architecture: "x86_64", Local: true},
+		wantErr: "invalid version",
+	}, {
+		name:    "empty architecture",
+		pkg:     lock.LockPkg{Name: "pretend-baselayout", Version: "1.0.0-r0", Local: true},
+		wantErr: "invalid architecture",
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := resolveLocalPackage(t.Context(), tt.pkg, []string{repo}, []string{digest})
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestLocalPackagePath(t *testing.T) {
+	repo := t.TempDir()
+	tests := []struct {
+		name     string
+		arch     string
+		filename string
+		wantErr  bool
+	}{{
+		name:     "inside",
+		arch:     "x86_64",
+		filename: "foo-1.0.apk",
+	}, {
+		name:     "parent architecture",
+		arch:     "..",
+		filename: "foo-1.0.apk",
+		wantErr:  true,
+	}, {
+		name:     "parent in file name",
+		arch:     "x86_64",
+		filename: "../../foo-1.0.apk",
+		wantErr:  true,
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := localPackagePath(repo, tt.arch, tt.filename)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "escapes local repository")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, filepath.Join(repo, tt.arch, tt.filename), got)
+		})
+	}
+}
+
+func TestResolveLocalPackageRepositoryOrder(t *testing.T) {
+	src := filepath.Join(testPackagesDir, "packages", "x86_64", "pretend-baselayout-1.0.0-r0.apk")
+	good, err := os.ReadFile(src)
+	require.NoError(t, err)
+	goodDigest := apkDigest(t, src)
+
+	mkrepo := func(t *testing.T, content []byte) string {
+		t.Helper()
+		repo := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(repo, "x86_64"), 0o755))
+		if content != nil {
+			require.NoError(t, os.WriteFile(filepath.Join(repo, "x86_64", "pretend-baselayout-1.0.0-r0.apk"), content, 0o644)) //nolint:gosec // test fixture
+		}
+		return repo
+	}
+	garbage := []byte("not an apk")
+
+	tests := []struct {
+		name     string
+		repos    func(t *testing.T) []string
+		wantRepo int
+		wantErr  string
+	}{{
+		name:     "first repository matches",
+		repos:    func(t *testing.T) []string { return []string{mkrepo(t, good), mkrepo(t, garbage)} },
+		wantRepo: 0,
+	}, {
+		name:     "mismatching candidate is skipped without being expanded",
+		repos:    func(t *testing.T) []string { return []string{mkrepo(t, garbage), mkrepo(t, good)} },
+		wantRepo: 1,
+	}, {
+		name:     "missing candidate is skipped",
+		repos:    func(t *testing.T) []string { return []string{mkrepo(t, nil), mkrepo(t, good)} },
+		wantRepo: 1,
+	}, {
+		name:    "no candidate matches",
+		repos:   func(t *testing.T) []string { return []string{mkrepo(t, garbage), mkrepo(t, garbage)} },
+		wantErr: "matches no --local-package pretend-baselayout digest",
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repos := tt.repos(t)
+			got, err := resolveLocalPackage(t.Context(), localEntry("pretend-baselayout", "1.0.0-r0"), repos, []string{goodDigest})
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			want, err := filepath.Abs(filepath.Join(repos[tt.wantRepo], "x86_64", "pretend-baselayout-1.0.0-r0.apk"))
+			require.NoError(t, err)
+			require.Equal(t, want, got.url)
+		})
+	}
+}
+
+func TestLockInstallOptionsRepositoryOrder(t *testing.T) {
+	bc := &Context{}
+	bc.ic.Contents.BuildRepositories = []string{"./zzz"}
+	bc.ic.Contents.Repositories = []string{"./mmm", "https://packages.example/os"}
+	bc.o.ExtraBuildRepos = []string{"./aaa"}
+	bc.o.ExtraRepos = []string{"./mmm", "./bbb"}
+	require.Equal(t, []string{"./zzz", "./mmm", "./aaa", "./bbb"}, bc.lockInstallOptions().localRepos)
+}
+
+func TestLockedKeys(t *testing.T) {
+	const keyA = "https://keys.example/a.rsa.pub"
+	const keyB = "/etc/keys/b.rsa.pub"
+	const keyAOther = "https://other.example/a.rsa.pub"
+	l := lock.Lock{Contents: lock.LockContents{Keyrings: []lock.LockKeyring{
+		{URL: keyA, Content: "A"},
+		{URL: keyB, Content: "B"},
+		{URL: keyAOther, Content: "A2"},
+		{URL: "https://keys.example/empty.rsa.pub"},
+	}}}
+
+	tests := []struct {
+		name          string
+		keyring       []string
+		require       bool
+		wantEmbedded  []string
+		wantRemaining []string
+		wantErr       string
+	}{{
+		name:         "configured and appended keys embedded",
+		keyring:      []string{keyA, keyB},
+		require:      true,
+		wantEmbedded: []string{keyA, keyB},
+	}, {
+		name:          "key without content is fetched when not required",
+		keyring:       []string{keyA, "https://keys.example/c.rsa.pub"},
+		wantEmbedded:  []string{keyA},
+		wantRemaining: []string{"https://keys.example/c.rsa.pub"},
+	}, {
+		name:    "key without content fails when required",
+		keyring: []string{keyA, "https://keys.example/c.rsa.pub"},
+		require: true,
+		wantErr: "have no content embedded in the lock file",
+	}, {
+		name:    "key with empty content fails when required",
+		keyring: []string{"https://keys.example/empty.rsa.pub"},
+		require: true,
+		wantErr: "have no content embedded in the lock file",
+	}, {
+		name:    "fetched key collides with embedded key",
+		keyring: []string{keyA, "https://live.example/a.rsa.pub"},
+		wantErr: "would both be installed as /etc/apk/keys/a.rsa.pub",
+	}, {
+		name:    "embedded keys collide",
+		keyring: []string{keyA, keyAOther},
+		require: true,
+		wantErr: "would both be installed as /etc/apk/keys/a.rsa.pub",
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keys, remaining, err := lockedKeys(t.Context(), l, tt.keyring, tt.require)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.ElementsMatch(t, tt.wantEmbedded, slices.Collect(maps.Keys(keys)))
+			require.Equal(t, tt.wantRemaining, remaining)
 		})
 	}
 }

@@ -60,12 +60,16 @@ type lockInstallOptions struct {
 }
 
 func (bc *Context) lockInstallOptions() lockInstallOptions {
-	repos := sets.List(
-		sets.New(bc.ic.Contents.BuildRepositories...).
-			Insert(bc.ic.Contents.Repositories...).
-			Insert(bc.o.ExtraBuildRepos...).
-			Insert(bc.o.ExtraRepos...),
-	)
+	var repos []string
+	seen := sets.New[string]()
+	for _, group := range [][]string{bc.ic.Contents.BuildRepositories, bc.ic.Contents.Repositories, bc.o.ExtraBuildRepos, bc.o.ExtraRepos} {
+		for _, r := range group {
+			if !seen.Has(r) {
+				seen.Insert(r)
+				repos = append(repos, r)
+			}
+		}
+	}
 	return lockInstallOptions{
 		localRepos:             localRepositories(repos),
 		localPackages:          bc.o.LocalPackages,
@@ -73,8 +77,8 @@ func (bc *Context) lockInstallOptions() lockInstallOptions {
 	}
 }
 
-// localRepositories returns the repositories that are local directories,
-// without their "@tag" prefix.
+// localRepositories returns, in order, the repositories that are local
+// directories, without their "@tag" prefix.
 func localRepositories(repos []string) []string {
 	var local []string
 	for _, r := range repos {
@@ -188,33 +192,96 @@ func parseDataChecksum(s string) ([]byte, error) {
 // resolveLocalPackage finds the .apk for a local lock entry in the local
 // repositories, checks its whole-file sha256 against the accepted digests and
 // its .PKGINFO against the entry, and returns it as a cache-bypassing package
-// pinned to that digest.
+// pinned to that digest. Repositories are searched in order; a candidate whose
+// digest matches none of the accepted digests is skipped in favor of the next
+// repository, and only a candidate whose digest matches is expanded.
 func resolveLocalPackage(ctx context.Context, p lock.LockPkg, repos []string, digests []string) (installablePackage, error) {
 	ref := fmt.Sprintf("%s-%s (%s)", p.Name, p.Version, p.Architecture)
 	if len(digests) == 0 {
 		return installablePackage{}, fmt.Errorf("locked package %s is local: pass --local-package %s=sha256:<hex>", ref, p.Name)
 	}
-
-	filename := p.Name + "-" + p.Version + ".apk"
-	var path string
-	for _, repo := range repos {
-		candidate := filepath.Join(repo, p.Architecture, filename)
-		if _, err := os.Stat(candidate); err == nil {
-			path = candidate
-			break
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return installablePackage{}, fmt.Errorf("locked package %s: %w", ref, err)
+	for field, v := range map[string]string{"name": p.Name, "version": p.Version, "architecture": p.Architecture} {
+		if err := checkPathComponent(v); err != nil {
+			return installablePackage{}, fmt.Errorf("locked package %s: invalid %s: %w", ref, field, err)
 		}
 	}
-	if path == "" {
-		return installablePackage{}, fmt.Errorf("locked package %s is local but %s/%s was not found in local repositories %v", ref, p.Architecture, filename, repos)
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return installablePackage{}, err
-	}
 
-	f, err := os.Open(abs)
+	filename := p.Name + "-" + p.Version + ".apk"
+	var mismatched []string
+	for _, repo := range repos {
+		candidate, err := localPackagePath(repo, p.Architecture, filename)
+		if err != nil {
+			return installablePackage{}, fmt.Errorf("locked package %s: %w", ref, err)
+		}
+		sum, err := hashFile(candidate)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return installablePackage{}, fmt.Errorf("locked package %s: %w", ref, err)
+		}
+		if !slices.ContainsFunc(digests, func(d string) bool {
+			want, err := lock.ParseSHA256(d)
+			return err == nil && bytes.Equal(want, sum)
+		}) {
+			mismatched = append(mismatched, fmt.Sprintf("%s has digest %s", candidate, lock.FormatSHA256(sum)))
+			continue
+		}
+		return expandLocalPackage(ctx, p, ref, candidate, sum)
+	}
+	if len(mismatched) > 0 {
+		return installablePackage{}, fmt.Errorf("locked package %s: %s, which matches no --local-package %s digest", ref, strings.Join(mismatched, "; "), p.Name)
+	}
+	return installablePackage{}, fmt.Errorf("locked package %s is local but %s/%s was not found in local repositories %v", ref, p.Architecture, filename, repos)
+}
+
+// checkPathComponent fails unless v is usable as a single file name
+// component.
+func checkPathComponent(v string) error {
+	switch {
+	case v == "":
+		return errors.New("empty")
+	case strings.ContainsAny(v, "/\\\x00"):
+		return fmt.Errorf("%q contains a path separator or NUL", v)
+	case strings.Contains(v, ".."):
+		return fmt.Errorf("%q contains \"..\"", v)
+	case filepath.Clean(v) != v:
+		return fmt.Errorf("%q is not a clean path component", v)
+	}
+	return nil
+}
+
+// localPackagePath joins repo, arch and filename and fails when the result is
+// not inside repo.
+func localPackagePath(repo, arch, filename string) (string, error) {
+	root, err := filepath.Abs(repo)
+	if err != nil {
+		return "", err
+	}
+	candidate := filepath.Clean(filepath.Join(root, arch, filename))
+	rel, err := filepath.Rel(root, candidate)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("%s/%s escapes local repository %s", arch, filename, repo)
+	}
+	return candidate, nil
+}
+
+func hashFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, fmt.Errorf("hashing %s: %w", path, err)
+	}
+	return h.Sum(nil), nil
+}
+
+// expandLocalPackage expands the local package at path, checks that its
+// content still has digest sum and that its .PKGINFO matches p.
+func expandLocalPackage(ctx context.Context, p lock.LockPkg, ref, path string, sum []byte) (installablePackage, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return installablePackage{}, fmt.Errorf("locked package %s: %w", ref, err)
 	}
@@ -223,19 +290,14 @@ func resolveLocalPackage(ctx context.Context, p lock.LockPkg, repos []string, di
 	h := sha256.New()
 	exp, err := expandapk.ExpandApk(ctx, io.TeeReader(f, h), "")
 	if err != nil {
-		return installablePackage{}, fmt.Errorf("locked package %s: expanding %s: %w", ref, abs, err)
+		return installablePackage{}, fmt.Errorf("locked package %s: expanding %s: %w", ref, path, err)
 	}
 	defer exp.Close()
 	if _, err := io.Copy(h, f); err != nil {
-		return installablePackage{}, fmt.Errorf("locked package %s: hashing %s: %w", ref, abs, err)
+		return installablePackage{}, fmt.Errorf("locked package %s: hashing %s: %w", ref, path, err)
 	}
-	sum := h.Sum(nil)
-
-	if !slices.ContainsFunc(digests, func(d string) bool {
-		want, err := lock.ParseSHA256(d)
-		return err == nil && bytes.Equal(want, sum)
-	}) {
-		return installablePackage{}, fmt.Errorf("locked package %s: %s has digest %s, which matches no --local-package %s digest", ref, abs, lock.FormatSHA256(sum), p.Name)
+	if got := h.Sum(nil); !bytes.Equal(got, sum) {
+		return installablePackage{}, fmt.Errorf("locked package %s: %s changed while it was read", ref, path)
 	}
 
 	info, err := exp.PkgInfo()
@@ -243,12 +305,12 @@ func resolveLocalPackage(ctx context.Context, p lock.LockPkg, repos []string, di
 		return installablePackage{}, fmt.Errorf("locked package %s: %w", ref, err)
 	}
 	if info.Name != p.Name || info.Version != p.Version || info.Arch != p.Architecture {
-		return installablePackage{}, fmt.Errorf("locked package %s: %s contains %s-%s (%s)", ref, abs, info.Name, info.Version, info.Arch)
+		return installablePackage{}, fmt.Errorf("locked package %s: %s contains %s-%s (%s)", ref, path, info.Name, info.Version, info.Arch)
 	}
 
 	return installablePackage{
 		name:       p.Name,
-		url:        abs,
+		url:        path,
 		checksum:   "Q1" + base64.StdEncoding.EncodeToString(exp.ControlHash),
 		fileSHA256: sum,
 		local:      true,

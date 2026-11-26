@@ -74,8 +74,8 @@ func TestCachePackage_SurvivesDataEntryDisturbedAfterPublish(t *testing.T) {
 	}
 
 	get := func(t *testing.T, disturb func(*testing.T, string)) ([]string, error) {
-		globalApkCache.Forget(pkg.URL())
-		t.Cleanup(func() { globalApkCache.Forget(pkg.URL()) })
+		globalApkCache.Forget(packageCacheKey(pkg))
+		t.Cleanup(func() { globalApkCache.Forget(packageCacheKey(pkg)) })
 
 		orig := replaceCachedFile
 		replaceCachedFile = func(src, dst string) error {

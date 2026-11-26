@@ -84,8 +84,8 @@ func TestGetPackage_OfflineReadOnlyCache(t *testing.T) {
 			makeReadOnly(t, root)
 			before := snapshotTree(t, root)
 
-			globalApkCache.Forget(pkg.URL())
-			t.Cleanup(func() { globalApkCache.Forget(pkg.URL()) })
+			globalApkCache.Forget(packageCacheKey(pkg))
+			t.Cleanup(func() { globalApkCache.Forget(packageCacheKey(pkg)) })
 
 			a, err := New(t.Context(),
 				WithFS(apkfs.NewMemFS()),

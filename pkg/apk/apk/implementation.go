@@ -753,8 +753,13 @@ func (a *APK) CalculateWorld(ctx context.Context, allpkgs []*RepositoryPackage) 
 				return fmt.Errorf("expanding %s: %w", pkg.Name, err)
 			}
 			r := NewAPKResolved(pkg, expanded)
-			if r.FileHash, err = FileSHA256(expanded); err != nil {
-				return fmt.Errorf("hashing %s: %w", pkg.Name, err)
+			if fd, ok := a.packageGetter.(FileDigestGetter); ok {
+				if r.FileHash, err = fd.VerifiedFileSHA256(ctx, pkg); err != nil {
+					return fmt.Errorf("hashing %s: %w", pkg.Name, err)
+				}
+			}
+			if r.FileHash == nil {
+				clog.FromContext(ctx).Warnf("no verified .apk available to compute the sha256 of %s", pkg.Name)
 			}
 			resolved[i] = r
 			return nil
@@ -856,6 +861,7 @@ func (a *APK) InstallPackages(ctx context.Context, sourceDateEpoch *time.Time, a
 	g.SetLimit(jobs + 1)
 
 	expanded := make([]*expandapk.APKExpanded, len(allpkgs))
+	expandErrs := make([]error, len(allpkgs))
 
 	// Track what files were installed by which packages so we can deduplicate in idb.
 	allFiles := make([][]tar.Header, len(allpkgs))
@@ -882,6 +888,9 @@ func (a *APK) InstallPackages(ctx context.Context, sourceDateEpoch *time.Time, a
 				pkg := allpkgs[i]
 
 				if exp == nil {
+					if err := expandErrs[i]; err != nil {
+						return err
+					}
 					return fmt.Errorf("expansion of %s failed", pkg)
 				}
 
@@ -921,7 +930,12 @@ func (a *APK) InstallPackages(ctx context.Context, sourceDateEpoch *time.Time, a
 			defer func() { close(done[i]) }()
 			exp, err := a.packageGetter.GetPackage(ctx, pkg)
 			if err != nil {
-				return fmt.Errorf("expanding %s: %w", pkg, err)
+				expandErrs[i] = fmt.Errorf("expanding %s: %w", pkg, err)
+				return expandErrs[i]
+			}
+			if err := VerifyPinnedDigests(pkg, exp); err != nil {
+				expandErrs[i] = fmt.Errorf("verifying %s: %w", pkg, err)
+				return expandErrs[i]
 			}
 
 			expanded[i] = exp
