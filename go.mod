@@ -2,6 +2,8 @@ module chainguard.dev/apko
 
 go 1.27.0
 
+toolchain go1.27.4
+
 require (
 	chainguard.dev/sdk v0.2.9
 	github.com/chainguard-dev/clog v1.8.1
