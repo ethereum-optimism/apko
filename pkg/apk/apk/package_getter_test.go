@@ -439,8 +439,8 @@ func TestCachedPackage_TamperedData(t *testing.T) {
 
 		// cachedPackage is reached only on a disk-cache hit, so the in-memory
 		// singleflight cache must not answer for us.
-		globalApkCache.Forget(pkg.URL())
-		t.Cleanup(func() { globalApkCache.Forget(pkg.URL()) })
+		globalApkCache.Forget(packageCacheKey(pkg))
+		t.Cleanup(func() { globalApkCache.Forget(packageCacheKey(pkg)) })
 
 		tmpDir := t.TempDir()
 		httpClient := &http.Client{Transport: &testLocalTransport{root: testPrimaryPkgDir, basenameOnly: true}}
@@ -604,8 +604,8 @@ func TestGetPackage_PoisonedCacheIsRepaired(t *testing.T) {
 	pkg := NewRepositoryPackage(&testPkg, repoWithIndex)
 	ctx := context.Background()
 
-	globalApkCache.Forget(pkg.URL())
-	t.Cleanup(func() { globalApkCache.Forget(pkg.URL()) })
+	globalApkCache.Forget(packageCacheKey(pkg))
+	t.Cleanup(func() { globalApkCache.Forget(packageCacheKey(pkg)) })
 
 	tmpDir := t.TempDir()
 	httpClient := &http.Client{Transport: &testLocalTransport{root: testPrimaryPkgDir, basenameOnly: true}}
@@ -628,12 +628,12 @@ func TestGetPackage_PoisonedCacheIsRepaired(t *testing.T) {
 	require.NoError(t, os.Remove(datGz))
 	require.NoError(t, os.WriteFile(datGz, gzipped(t, evil), 0o644))
 
-	globalApkCache.Forget(pkg.URL())
+	globalApkCache.Forget(packageCacheKey(pkg))
 	_, err = a.cachedPackage(ctx, pkg, cacheDir)
 	require.Error(t, err, "poisoned entry should be rejected on the read path")
 	require.Contains(t, err.Error(), "data hash mismatch")
 
-	globalApkCache.Forget(pkg.URL())
+	globalApkCache.Forget(packageCacheKey(pkg))
 	got, err := a.GetPackage(ctx, pkg)
 	require.NoError(t, err, "refetch after rejection should succeed")
 
@@ -649,7 +649,7 @@ func TestGetPackage_PoisonedCacheIsRepaired(t *testing.T) {
 	// uncompressed bytes could never fail and would assert nothing.
 	require.Equal(t, wantGzSum, sha256File(t, datGz), "poisoned .dat.tar.gz survived the repair")
 
-	globalApkCache.Forget(pkg.URL())
+	globalApkCache.Forget(packageCacheKey(pkg))
 	_, err = a.cachedPackage(ctx, pkg, cacheDir)
 	require.NoError(t, err, "cache still rejects after a repair refetch")
 }
@@ -672,8 +672,8 @@ func TestCachedPackageSurvivesInPlaceRewrite(t *testing.T) {
 	repoWithIndex := repo.WithIndex(&APKIndex{Packages: []*Package{&testPkg}})
 	pkg := NewRepositoryPackage(&testPkg, repoWithIndex)
 
-	globalApkCache.Forget(pkg.URL())
-	t.Cleanup(func() { globalApkCache.Forget(pkg.URL()) })
+	globalApkCache.Forget(packageCacheKey(pkg))
+	t.Cleanup(func() { globalApkCache.Forget(packageCacheKey(pkg)) })
 
 	httpClient := &http.Client{Transport: &testLocalTransport{root: testPrimaryPkgDir, basenameOnly: true}}
 	a := newDefaultPackageGetter(httpClient, &cache{
@@ -760,8 +760,8 @@ func TestInstallDoesNotReadTheCachedTar(t *testing.T) {
 	_, isWH := apk.fs.(WriteHeaderer)
 	require.False(t, isWH, "test fs implements WriteHeaderer; this would exercise the lazy install branch instead")
 
-	globalApkCache.Forget(pkg.URL())
-	t.Cleanup(func() { globalApkCache.Forget(pkg.URL()) })
+	globalApkCache.Forget(packageCacheKey(pkg))
+	t.Cleanup(func() { globalApkCache.Forget(packageCacheKey(pkg)) })
 
 	httpClient := &http.Client{Transport: &testLocalTransport{root: testPrimaryPkgDir, basenameOnly: true}}
 	a := newDefaultPackageGetter(httpClient, &cache{
@@ -800,8 +800,8 @@ func TestCachedPackageHonoursDataSizeLimit(t *testing.T) {
 	repoWithIndex := repo.WithIndex(&APKIndex{Packages: []*Package{&testPkg}})
 	pkg := NewRepositoryPackage(&testPkg, repoWithIndex)
 
-	globalApkCache.Forget(pkg.URL())
-	t.Cleanup(func() { globalApkCache.Forget(pkg.URL()) })
+	globalApkCache.Forget(packageCacheKey(pkg))
+	t.Cleanup(func() { globalApkCache.Forget(packageCacheKey(pkg)) })
 
 	httpClient := &http.Client{Transport: &testLocalTransport{root: testPrimaryPkgDir, basenameOnly: true}}
 	shared := &cache{dir: t.TempDir(), offline: false, shared: NewCache(false)}
@@ -838,7 +838,7 @@ func TestCachedPackageHonoursDataSizeLimit(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			globalApkCache.Forget(pkg.URL())
+			globalApkCache.Forget(packageCacheKey(pkg))
 			a := newDefaultPackageGetter(httpClient, shared, auth.DefaultAuthenticators, tc.opts...)
 
 			got, err := a.cachedPackage(ctx, pkg, cacheDir)
@@ -862,8 +862,8 @@ func BenchmarkCachedPackage(b *testing.B) {
 	pkg := NewRepositoryPackage(&testPkg, repoWithIndex)
 	ctx := context.Background()
 
-	globalApkCache.Forget(pkg.URL())
-	b.Cleanup(func() { globalApkCache.Forget(pkg.URL()) })
+	globalApkCache.Forget(packageCacheKey(pkg))
+	b.Cleanup(func() { globalApkCache.Forget(packageCacheKey(pkg)) })
 
 	httpClient := &http.Client{Transport: &testLocalTransport{root: testPrimaryPkgDir, basenameOnly: true}}
 	a := newDefaultPackageGetter(httpClient, &cache{
@@ -1104,8 +1104,8 @@ func TestGetPackage_PrePlantedEntryLosesToVerifiedDownload(t *testing.T) {
 
 	newGetter := func(t *testing.T, dir string) *defaultPackageGetter {
 		t.Helper()
-		globalApkCache.Forget(pkg.URL())
-		t.Cleanup(func() { globalApkCache.Forget(pkg.URL()) })
+		globalApkCache.Forget(packageCacheKey(pkg))
+		t.Cleanup(func() { globalApkCache.Forget(packageCacheKey(pkg)) })
 		return newDefaultPackageGetter(
 			&http.Client{Transport: &testLocalTransport{root: testPrimaryPkgDir, basenameOnly: true}},
 			&cache{dir: dir, offline: false, shared: NewCache(false)},
@@ -1209,8 +1209,8 @@ func TestGetPackage_CacheEntryHasNoUncompressedTar(t *testing.T) {
 	repoWithIndex := repo.WithIndex(&APKIndex{Packages: []*Package{&testPkg}})
 	pkg := NewRepositoryPackage(&testPkg, repoWithIndex)
 
-	globalApkCache.Forget(pkg.URL())
-	t.Cleanup(func() { globalApkCache.Forget(pkg.URL()) })
+	globalApkCache.Forget(packageCacheKey(pkg))
+	t.Cleanup(func() { globalApkCache.Forget(packageCacheKey(pkg)) })
 
 	httpClient := &http.Client{Transport: &testLocalTransport{root: testPrimaryPkgDir, basenameOnly: true}}
 	a := newDefaultPackageGetter(httpClient, &cache{dir: t.TempDir(), offline: false, shared: NewCache(false)}, auth.DefaultAuthenticators)
@@ -1254,7 +1254,7 @@ func TestGetPackage_CacheEntryHasNoUncompressedTar(t *testing.T) {
 		require.Less(t, size, cold.TarFS.Size(), "%s is as large as the uncompressed data section", name)
 	}
 
-	globalApkCache.Forget(pkg.URL())
+	globalApkCache.Forget(packageCacheKey(pkg))
 	warm, err := a.cachedPackage(ctx, pkg, dir)
 	require.NoError(t, err, "warm read")
 	require.Empty(t, warm.TarFile)

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/chainguard-dev/clog"
 
@@ -36,6 +37,7 @@ import (
 	"chainguard.dev/apko/pkg/build"
 	"chainguard.dev/apko/pkg/build/types"
 	pkglock "chainguard.dev/apko/pkg/lock"
+	"chainguard.dev/apko/pkg/options"
 )
 
 func lock() *cobra.Command {
@@ -170,7 +172,7 @@ func LockCmd(ctx context.Context, output string, archs []types.Architecture, opt
 	}
 
 	explicitClient := &http.Client{}
-	for _, keyring := range ic.Contents.Keyring {
+	for _, keyring := range lockedKeyring(ic, o) {
 		b, err := loadKeyringBytes(ctx, explicitClient, keyring)
 		if err != nil {
 			return fmt.Errorf("failed to load keyring %s: %w", keyring, err)
@@ -292,6 +294,12 @@ func repoLock(repositoryURI string, arch types.Architecture) (pkglock.LockRepo, 
 		URL:          url,
 		Architecture: arch.ToAPK(),
 	}, nil
+}
+
+// lockedKeyring returns the keyring entries whose content the lock embeds: the
+// configured keyring and the keys appended with --keyring-append.
+func lockedKeyring(ic *types.ImageConfiguration, o *options.Options) []string {
+	return sets.List(sets.New(ic.Contents.Keyring...).Insert(o.ExtraKeyFiles...))
 }
 
 func isLocalPackageURL(u string) bool {

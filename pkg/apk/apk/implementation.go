@@ -753,8 +753,13 @@ func (a *APK) CalculateWorld(ctx context.Context, allpkgs []*RepositoryPackage) 
 				return fmt.Errorf("expanding %s: %w", pkg.Name, err)
 			}
 			r := NewAPKResolved(pkg, expanded)
-			if r.FileHash, err = FileSHA256(expanded); err != nil {
-				return fmt.Errorf("hashing %s: %w", pkg.Name, err)
+			if fd, ok := a.packageGetter.(FileDigestGetter); ok {
+				if r.FileHash, err = fd.VerifiedFileSHA256(ctx, pkg); err != nil {
+					return fmt.Errorf("hashing %s: %w", pkg.Name, err)
+				}
+			}
+			if r.FileHash == nil {
+				clog.FromContext(ctx).Warnf("no verified .apk available to compute the sha256 of %s", pkg.Name)
 			}
 			resolved[i] = r
 			return nil
@@ -922,6 +927,9 @@ func (a *APK) InstallPackages(ctx context.Context, sourceDateEpoch *time.Time, a
 			exp, err := a.packageGetter.GetPackage(ctx, pkg)
 			if err != nil {
 				return fmt.Errorf("expanding %s: %w", pkg, err)
+			}
+			if err := VerifyPinnedDigests(pkg, exp); err != nil {
+				return fmt.Errorf("verifying %s: %w", pkg, err)
 			}
 
 			expanded[i] = exp

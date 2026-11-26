@@ -17,7 +17,10 @@ package build
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 
+	"github.com/chainguard-dev/clog"
 	"go.opentelemetry.io/otel"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -121,6 +124,22 @@ func (bc *Context) installLockedKeys(ctx context.Context, keyring []string) ([]s
 	if err != nil {
 		return nil, err
 	}
+	keys, remaining, err := lockedKeys(ctx, l, keyring, bc.o.RequireStrongChecksums)
+	if err != nil {
+		return nil, err
+	}
+	if err := bc.apk.InstallKeys(ctx, keys); err != nil {
+		return nil, err
+	}
+	return remaining, nil
+}
+
+// lockedKeys splits keyring into the keys whose content l embeds, returned
+// with that content, and the keys that have to be fetched. A key without
+// embedded content is an error when requireEmbedded is set, and a warning
+// otherwise. Two keyring entries that would be written to the same keyring
+// file are an error when either of them is embedded.
+func lockedKeys(ctx context.Context, l lock.Lock, keyring []string, requireEmbedded bool) (map[string][]byte, []string, error) {
 	content := make(map[string]string, len(l.Contents.Keyrings))
 	for _, k := range l.Contents.Keyrings {
 		if k.Content != "" {
@@ -137,8 +156,30 @@ func (bc *Context) installLockedKeys(ctx context.Context, keyring []string) ([]s
 			remaining = append(remaining, k)
 		}
 	}
-	if err := bc.apk.InstallKeys(ctx, keys); err != nil {
-		return nil, err
+
+	byName := map[string]string{}
+	for _, k := range keyring {
+		name := filepath.Base(k)
+		prev, ok := byName[name]
+		if !ok {
+			byName[name] = k
+			continue
+		}
+		if prev == k {
+			continue
+		}
+		_, prevEmbedded := keys[prev]
+		_, embedded := keys[k]
+		if prevEmbedded || embedded {
+			return nil, nil, fmt.Errorf("keyring entries %s and %s would both be installed as %s", prev, k, "/etc/apk/keys/"+name)
+		}
 	}
-	return remaining, nil
+
+	if len(remaining) > 0 {
+		if requireEmbedded {
+			return nil, nil, fmt.Errorf("keyring entries have no content embedded in the lock file (regenerate the lock file): %s", strings.Join(remaining, ", "))
+		}
+		clog.FromContext(ctx).Warnf("%d keyring entries have no content embedded in the lock file and are fetched instead; regenerate the lock file: %s", len(remaining), strings.Join(remaining, ", "))
+	}
+	return keys, remaining, nil
 }
