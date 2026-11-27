@@ -13,9 +13,12 @@ import (
 )
 
 type Lock struct {
-	Version  string       `json:"version"`
-	Config   *Config      `json:"config,omitempty"`
-	Contents LockContents `json:"contents"`
+	Version string  `json:"version"`
+	Config  *Config `json:"config,omitempty"`
+	// UnverifiedIndexes records that the packages were resolved from
+	// repository indexes whose signatures were not verified.
+	UnverifiedIndexes bool         `json:"unverified_indexes,omitempty"`
+	Contents          LockContents `json:"contents"`
 }
 
 // Origin describes the source file used to generate the lock file.
@@ -110,6 +113,12 @@ type LockKeyring struct {
 	URL  string `json:"url"`
 	// Content is the raw keyring content (typically a PEM-encoded public key).
 	Content string `json:"content,omitempty"`
+	// DiscoveredFor lists the repositories the key was discovered for. It is
+	// empty for configured keyring entries.
+	DiscoveredFor []string `json:"discovered_for,omitempty"`
+	// Architectures lists the architectures a discovered key applies to. It
+	// is empty when the key applies to every architecture.
+	Architectures []string `json:"architectures,omitempty"`
 }
 
 func FromFile(lockFile string) (Lock, error) {

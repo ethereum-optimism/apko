@@ -58,8 +58,18 @@ These checks also apply when apko is used as a library with a custom
 `apko lock` computes `sha256` from a verified `.apk` file: the raw `.apk` in
 the cache when its APK checksum and `datahash` verify, and otherwise the file
 fetched from the network. It never computes it from expanded cache entries.
-An offline `apko lock` whose cache holds no raw `.apk` for a package writes no
-`sha256` for it.
+`apko lock` fails when it cannot compute `sha256` for a package from an
+http(s) repository, for example an offline `apko lock` whose cache holds no
+raw `.apk` for the package, or a `PackageGetter` that cannot provide the
+verified file.
+
+## Unverified indexes
+
+`apko lock --ignore-signatures` resolves packages from repository indexes
+whose signatures are not verified, and records this as
+`"unverified_indexes": true` at the top level of the lock file. A
+`--lockfile` build of such a lock warns, and fails with
+`--require-strong-checksums`.
 
 ## Keyring
 
@@ -70,6 +80,18 @@ is missing from the lock file is fetched with a warning, or fails the build
 with `--require-strong-checksums`. Two keyring entries that would be written
 to the same file under `/etc/apk/keys` fail the build when either of them
 comes from the lock file.
+
+`apko lock` also embeds the keys it discovers for the repositories (Alpine
+release keys and Chainguard-style `apk-configuration` keys). Each discovered
+entry lists the repositories it was discovered for in `discovered_for`, and,
+for keys that apply to some architectures only, those architectures in
+`architectures`. A `--lockfile` build does not discover keys: it installs the
+discovered entries of its build repositories and architecture from the lock
+file. Lock files written before `discovered_for` existed have their
+Chainguard-style keys matched to the repositories by URL. Any other embedded
+entry that the build neither configures nor can match to a repository fails
+the build with `--require-strong-checksums`, and otherwise makes the build
+discover keys live, with a warning.
 
 ## Local packages
 

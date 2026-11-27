@@ -196,6 +196,53 @@ func TestLocalRepositories(t *testing.T) {
 	require.Equal(t, []string{"/work/packages", "./packages", "/abs/packages"}, got)
 }
 
+// remoteLockPackages returns the x86_64 entries of the test lock moved to
+// repoURL, and the content of the key they are signed with.
+func remoteLockPackages(t *testing.T, repoURL string) ([]lock.LockPkg, string) {
+	t.Helper()
+	base := testLock(t)
+	var pkgs []lock.LockPkg
+	for _, p := range base.Contents.Packages {
+		if p.Architecture != "x86_64" {
+			continue
+		}
+		p.URL = repoURL + "/x86_64/" + filepath.Base(p.URL)
+		pkgs = append(pkgs, p)
+	}
+	return pkgs, base.Contents.Keyrings[0].Content
+}
+
+func writeTestLock(t *testing.T, l lock.Lock) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "apko.lock.json")
+	require.NoError(t, l.SaveToFile(path))
+	return path
+}
+
+// populateLockCache returns an apk cache directory holding pkgs as fetched
+// from repoURL. With tamper, the signature section of replayout is swapped.
+func populateLockCache(t *testing.T, repoURL string, pkgs []lock.LockPkg, tamper bool) string {
+	t.Helper()
+	cacheDir := t.TempDir()
+	for _, p := range pkgs {
+		u, err := url.Parse(p.URL)
+		require.NoError(t, err)
+		dst := filepath.Join(cacheDir, url.QueryEscape(repoURL), "x86_64", filepath.Base(u.Path))
+		require.NoError(t, os.MkdirAll(filepath.Dir(dst), 0o755))
+		b, err := os.ReadFile(filepath.Join(testPackagesDir, "packages", "x86_64", filepath.Base(u.Path)))
+		require.NoError(t, err)
+		if tamper && p.Name == "replayout" {
+			// Swap in another package's signature section: the control
+			// and data sections, and so the APK checksum, are unchanged.
+			other, err := os.ReadFile(filepath.Join(testPackagesDir, "packages", "x86_64", "pretend-baselayout-1.0.0-r0.apk"))
+			require.NoError(t, err)
+			b = append(other[:signatureSize(t, other)], b[signatureSize(t, b):]...)
+		}
+		require.NoError(t, os.WriteFile(dst, b, 0o644)) //nolint:gosec // test fixture
+	}
+	return cacheDir
+}
+
 func signatureSize(t *testing.T, apkBytes []byte) int {
 	t.Helper()
 	exp, err := expandapk.ExpandApk(t.Context(), bytes.NewReader(apkBytes), t.TempDir())
@@ -221,43 +268,11 @@ func TestBuildFromLockOffline(t *testing.T) {
 	const repoURL = "https://packages.example/os"
 	const keyURL = repoURL + "/melange.rsa.pub"
 
-	base := testLock(t)
-	var pkgs []lock.LockPkg
-	for _, p := range base.Contents.Packages {
-		if p.Architecture != "x86_64" {
-			continue
-		}
-		p.URL = repoURL + "/x86_64/" + filepath.Base(p.URL)
-		pkgs = append(pkgs, p)
-	}
-	keyContent := base.Contents.Keyrings[0].Content
-
-	writeLock := func(t *testing.T, l lock.Lock) string {
-		t.Helper()
-		path := filepath.Join(t.TempDir(), "apko.lock.json")
-		require.NoError(t, l.SaveToFile(path))
-		return path
-	}
+	pkgs, keyContent := remoteLockPackages(t, repoURL)
+	writeLock := writeTestLock
 	populate := func(t *testing.T, tamper bool) string {
 		t.Helper()
-		cacheDir := t.TempDir()
-		for _, p := range pkgs {
-			u, err := url.Parse(p.URL)
-			require.NoError(t, err)
-			dst := filepath.Join(cacheDir, url.QueryEscape(repoURL), "x86_64", filepath.Base(u.Path))
-			require.NoError(t, os.MkdirAll(filepath.Dir(dst), 0o755))
-			b, err := os.ReadFile(filepath.Join(testPackagesDir, "packages", "x86_64", filepath.Base(u.Path)))
-			require.NoError(t, err)
-			if tamper && p.Name == "replayout" {
-				// Swap in another package's signature section: the control
-				// and data sections, and so the APK checksum, are unchanged.
-				other, err := os.ReadFile(filepath.Join(testPackagesDir, "packages", "x86_64", "pretend-baselayout-1.0.0-r0.apk"))
-				require.NoError(t, err)
-				b = append(other[:signatureSize(t, other)], b[signatureSize(t, b):]...)
-			}
-			require.NoError(t, os.WriteFile(dst, b, 0o644)) //nolint:gosec // test fixture
-		}
-		return cacheDir
+		return populateLockCache(t, repoURL, pkgs, tamper)
 	}
 
 	tests := []struct {
@@ -467,63 +482,119 @@ func TestLockInstallOptionsRepositoryOrder(t *testing.T) {
 }
 
 func TestLockedKeys(t *testing.T) {
+	const repo = "https://packages.example/os"
+	const runtimeRepo = "https://runtime.example/os"
 	const keyA = "https://keys.example/a.rsa.pub"
 	const keyB = "/etc/keys/b.rsa.pub"
 	const keyAOther = "https://other.example/a.rsa.pub"
-	l := lock.Lock{Contents: lock.LockContents{Keyrings: []lock.LockKeyring{
+	const discovered = repo + "/d.rsa.pub"
+	const arm64Only = "https://alpine.example/keys/arm.rsa.pub"
+	const runtimeOnly = runtimeRepo + "/r.rsa.pub"
+	const sameAsA = repo + "/a.rsa.pub"
+	base := []lock.LockKeyring{
 		{URL: keyA, Content: "A"},
-		{URL: keyB, Content: "B"},
-		{URL: keyAOther, Content: "A2"},
 		{URL: "https://keys.example/empty.rsa.pub"},
-	}}}
+		{URL: discovered, Content: "D", DiscoveredFor: []string{repo}},
+		{URL: arm64Only, Content: "ARM", DiscoveredFor: []string{repo}, Architectures: []string{"aarch64"}},
+		{URL: runtimeOnly, Content: "R", DiscoveredFor: []string{runtimeRepo}},
+	}
+	with := func(extra ...lock.LockKeyring) []lock.LockKeyring {
+		return append(slices.Clone(base), extra...)
+	}
 
 	tests := []struct {
 		name          string
+		keyrings      []lock.LockKeyring
 		keyring       []string
 		require       bool
 		wantEmbedded  []string
 		wantRemaining []string
+		wantDiscover  bool
 		wantErr       string
 	}{{
-		name:         "configured and appended keys embedded",
+		name:         "configured, appended and discovered keys embedded",
+		keyrings:     with(lock.LockKeyring{URL: keyB, Content: "B"}),
 		keyring:      []string{keyA, keyB},
 		require:      true,
-		wantEmbedded: []string{keyA, keyB},
+		wantEmbedded: []string{keyA, keyB, discovered},
 	}, {
 		name:          "key without content is fetched when not required",
+		keyrings:      base,
 		keyring:       []string{keyA, "https://keys.example/c.rsa.pub"},
-		wantEmbedded:  []string{keyA},
+		wantEmbedded:  []string{keyA, discovered},
 		wantRemaining: []string{"https://keys.example/c.rsa.pub"},
 	}, {
-		name:    "key without content fails when required",
-		keyring: []string{keyA, "https://keys.example/c.rsa.pub"},
-		require: true,
-		wantErr: "have no content embedded in the lock file",
+		name:     "key without content fails when required",
+		keyrings: base,
+		keyring:  []string{keyA, "https://keys.example/c.rsa.pub"},
+		require:  true,
+		wantErr:  "have no content embedded in the lock file",
 	}, {
-		name:    "key with empty content fails when required",
-		keyring: []string{"https://keys.example/empty.rsa.pub"},
-		require: true,
-		wantErr: "have no content embedded in the lock file",
+		name:     "key with empty content fails when required",
+		keyrings: base,
+		keyring:  []string{"https://keys.example/empty.rsa.pub"},
+		require:  true,
+		wantErr:  "have no content embedded in the lock file",
 	}, {
-		name:    "fetched key collides with embedded key",
-		keyring: []string{keyA, "https://live.example/a.rsa.pub"},
-		wantErr: "would both be installed as /etc/apk/keys/a.rsa.pub",
+		name:     "fetched key collides with embedded key",
+		keyrings: base,
+		keyring:  []string{keyA, "https://live.example/a.rsa.pub"},
+		wantErr:  "would both be installed as /etc/apk/keys/a.rsa.pub",
 	}, {
-		name:    "embedded keys collide",
-		keyring: []string{keyA, keyAOther},
-		require: true,
-		wantErr: "would both be installed as /etc/apk/keys/a.rsa.pub",
+		name:     "embedded keys collide",
+		keyrings: with(lock.LockKeyring{URL: keyAOther, Content: "A2"}),
+		keyring:  []string{keyA, keyAOther},
+		require:  true,
+		wantErr:  "would both be installed as /etc/apk/keys/a.rsa.pub",
+	}, {
+		name:         "discovered key with the content of a configured key",
+		keyrings:     with(lock.LockKeyring{URL: sameAsA, Content: "A", DiscoveredFor: []string{repo}}),
+		keyring:      []string{keyA},
+		require:      true,
+		wantEmbedded: []string{keyA, discovered},
+	}, {
+		name:     "discovered key collides with a configured key",
+		keyrings: with(lock.LockKeyring{URL: sameAsA, Content: "A2", DiscoveredFor: []string{repo}}),
+		keyring:  []string{keyA},
+		require:  true,
+		wantErr:  "would both be installed as /etc/apk/keys/a.rsa.pub",
+	}, {
+		name:         "key of an older lock matched by its discovery URL",
+		keyrings:     []lock.LockKeyring{{URL: keyA, Content: "A"}, {URL: discovered, Content: "D"}},
+		keyring:      []string{keyA},
+		require:      true,
+		wantEmbedded: []string{keyA, discovered},
+	}, {
+		name:     "configured key of the lock that the build does not configure fails when required",
+		keyrings: with(lock.LockKeyring{URL: keyB, Content: "B"}),
+		keyring:  []string{keyA},
+		require:  true,
+		wantErr:  "neither configured nor recorded as discovered for a repository",
+	}, {
+		name:     "key of an older lock that cannot be matched fails when required",
+		keyrings: with(lock.LockKeyring{URL: "https://alpine.example/keys/x.rsa.pub", Content: "X"}),
+		keyring:  []string{keyA},
+		require:  true,
+		wantErr:  "neither configured nor recorded as discovered for a repository",
+	}, {
+		name:         "key of an older lock that cannot be matched is discovered live otherwise",
+		keyrings:     with(lock.LockKeyring{URL: "https://alpine.example/keys/x.rsa.pub", Content: "X"}),
+		keyring:      []string{keyA},
+		wantEmbedded: []string{keyA, discovered},
+		wantDiscover: true,
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			keys, remaining, err := lockedKeys(t.Context(), l, tt.keyring, tt.require)
+			l := lock.Lock{Contents: lock.LockContents{Keyrings: tt.keyrings}}
+			got, err := lockedKeys(t.Context(), l, tt.keyring, []string{repo}, "x86_64", tt.require)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 				return
 			}
 			require.NoError(t, err)
-			require.ElementsMatch(t, tt.wantEmbedded, slices.Collect(maps.Keys(keys)))
-			require.Equal(t, tt.wantRemaining, remaining)
+			require.ElementsMatch(t, tt.wantEmbedded, slices.Collect(maps.Keys(got.embedded)))
+			require.Equal(t, tt.wantRemaining, got.remaining)
+			require.Equal(t, tt.wantDiscover, got.discover)
 		})
 	}
 }

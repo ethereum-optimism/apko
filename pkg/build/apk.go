@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/chainguard-dev/clog"
@@ -62,19 +63,30 @@ func (bc *Context) initializeApk(ctx context.Context) error {
 			Insert(bc.o.ExtraBuildRepos...).
 			Insert(bc.o.ExtraRepos...),
 	)
-	if err := bc.apk.InitDB(ctx, buildRepos...); err != nil {
+
+	keyring := sets.List(sets.New(bc.ic.Contents.Keyring...).Insert(bc.o.ExtraKeyFiles...))
+	discoverRepos := buildRepos
+	var embeddedKeys map[string][]byte
+	if bc.o.Lockfile != "" {
+		lk, err := bc.lockKeyring(ctx, keyring, buildRepos)
+		if err != nil {
+			return fmt.Errorf("failed to initialize apk keyring from lockfile: %w", err)
+		}
+		embeddedKeys, keyring = lk.embedded, lk.remaining
+		if !lk.discover {
+			discoverRepos = nil
+		}
+	}
+
+	if err := bc.apk.InitDB(ctx, discoverRepos...); err != nil {
 		return fmt.Errorf("failed to initialize apk database: %w", err)
 	}
 
 	var eg errgroup.Group
 
 	eg.Go(func() error {
-		keyring := sets.List(sets.New(bc.ic.Contents.Keyring...).Insert(bc.o.ExtraKeyFiles...))
-		if bc.o.Lockfile != "" {
-			var err error
-			if keyring, err = bc.installLockedKeys(ctx, keyring); err != nil {
-				return fmt.Errorf("failed to initialize apk keyring from lockfile: %w", err)
-			}
+		if err := bc.apk.InstallKeys(ctx, embeddedKeys); err != nil {
+			return fmt.Errorf("failed to initialize apk keyring from lockfile: %w", err)
 		}
 		if err := bc.apk.InitKeyring(ctx, keyring, nil); err != nil {
 			return fmt.Errorf("failed to initialize apk keyring: %w", err)
@@ -117,43 +129,75 @@ func (bc *Context) initializeApk(ctx context.Context) error {
 	return nil
 }
 
-// installLockedKeys installs the keys of keyring whose content is embedded in
-// the lockfile, and returns the keys that still have to be fetched.
-func (bc *Context) installLockedKeys(ctx context.Context, keyring []string) ([]string, error) {
+// lockKeys is the keyring of a build from a lockfile.
+type lockKeys struct {
+	// embedded are the keys installed from the content embedded in the lock,
+	// keyed by the URL or path they were obtained from.
+	embedded map[string][]byte
+	// remaining are the configured keys that have to be fetched.
+	remaining []string
+	// discover is set when the keys of the build repositories have to be
+	// discovered live because the lock does not record them.
+	discover bool
+}
+
+// lockKeyring loads the lockfile, checks that its repository indexes were
+// verified, and splits keyring into the keys the lock embeds and the keys that
+// still have to be fetched.
+func (bc *Context) lockKeyring(ctx context.Context, keyring, buildRepos []string) (lockKeys, error) {
 	l, err := lock.FromFile(bc.o.Lockfile)
 	if err != nil {
-		return nil, err
+		return lockKeys{}, err
 	}
-	keys, remaining, err := lockedKeys(ctx, l, keyring, bc.o.RequireStrongChecksums)
-	if err != nil {
-		return nil, err
+	if err := checkLockVerified(ctx, l, bc.o.Lockfile, bc.o.RequireStrongChecksums); err != nil {
+		return lockKeys{}, err
 	}
-	if err := bc.apk.InstallKeys(ctx, keys); err != nil {
-		return nil, err
+	return lockedKeys(ctx, l, keyring, buildRepos, bc.Arch().ToAPK(), bc.o.RequireStrongChecksums)
+}
+
+// checkLockVerified fails when l was generated without verifying the
+// signatures of the repository indexes and requireVerified is set, and warns
+// otherwise.
+func checkLockVerified(ctx context.Context, l lock.Lock, file string, requireVerified bool) error {
+	if !l.UnverifiedIndexes {
+		return nil
 	}
-	return remaining, nil
+	if requireVerified {
+		return fmt.Errorf("lock file %s was generated without verifying repository index signatures (regenerate it with signature verification)", file)
+	}
+	clog.FromContext(ctx).Warnf("lock file %s was generated without verifying repository index signatures; regenerate it with signature verification", file)
+	return nil
 }
 
 // lockedKeys splits keyring into the keys whose content l embeds, returned
-// with that content, and the keys that have to be fetched. A key without
-// embedded content is an error when requireEmbedded is set, and a warning
-// otherwise. Two keyring entries that would be written to the same keyring
-// file are an error when either of them is embedded.
-func lockedKeys(ctx context.Context, l lock.Lock, keyring []string, requireEmbedded bool) (map[string][]byte, []string, error) {
+// with that content, and the keys that have to be fetched. The returned keys
+// also include the keys l records as discovered for one of buildRepos and for
+// arch, so that they need not be discovered live.
+//
+// A key without embedded content is an error when requireEmbedded is set, and
+// a warning otherwise. Keys that a lock written by an older apko embeds
+// without recording what they were discovered for are matched to the build
+// repositories by their Chainguard-style discovery URL; when one cannot be
+// matched, it is an error when requireEmbedded is set, and otherwise the keys
+// are discovered live, as without a lock. Two keyring entries that would be written to the same
+// keyring file are an error when either of them is embedded, unless both are
+// embedded with the same content and one of them is discovered.
+func lockedKeys(ctx context.Context, l lock.Lock, keyring, buildRepos []string, arch string, requireEmbedded bool) (lockKeys, error) {
+	log := clog.FromContext(ctx)
+	configured := sets.New(keyring...)
 	content := make(map[string]string, len(l.Contents.Keyrings))
 	for _, k := range l.Contents.Keyrings {
-		if k.Content != "" {
+		if k.Content != "" && configured.Has(k.URL) {
 			content[k.URL] = k.Content
 		}
 	}
 
-	keys := map[string][]byte{}
-	var remaining []string
+	out := lockKeys{embedded: map[string][]byte{}}
 	for _, k := range keyring {
 		if c, ok := content[k]; ok {
-			keys[k] = []byte(c)
+			out.embedded[k] = []byte(c)
 		} else {
-			remaining = append(remaining, k)
+			out.remaining = append(out.remaining, k)
 		}
 	}
 
@@ -168,18 +212,72 @@ func lockedKeys(ctx context.Context, l lock.Lock, keyring []string, requireEmbed
 		if prev == k {
 			continue
 		}
-		_, prevEmbedded := keys[prev]
-		_, embedded := keys[k]
+		_, prevEmbedded := out.embedded[prev]
+		_, embedded := out.embedded[k]
 		if prevEmbedded || embedded {
-			return nil, nil, fmt.Errorf("keyring entries %s and %s would both be installed as %s", prev, k, "/etc/apk/keys/"+name)
+			return lockKeys{}, fmt.Errorf("keyring entries %s and %s would both be installed as %s", prev, k, "/etc/apk/keys/"+name)
 		}
 	}
 
-	if len(remaining) > 0 {
-		if requireEmbedded {
-			return nil, nil, fmt.Errorf("keyring entries have no content embedded in the lock file (regenerate the lock file): %s", strings.Join(remaining, ", "))
+	repos := sets.New(buildRepos...)
+	var undiscovered []string
+	for _, k := range l.Contents.Keyrings {
+		if k.Content == "" || configured.Has(k.URL) {
+			continue
 		}
-		clog.FromContext(ctx).Warnf("%d keyring entries have no content embedded in the lock file and are fetched instead; regenerate the lock file: %s", len(remaining), strings.Join(remaining, ", "))
+		discoveredFor := k.DiscoveredFor
+		if len(discoveredFor) == 0 {
+			if discoveredFor = chainguardKeyRepositories(k.URL, buildRepos); len(discoveredFor) == 0 {
+				undiscovered = append(undiscovered, k.URL)
+				continue
+			}
+		}
+		if !slices.ContainsFunc(discoveredFor, repos.Has) {
+			continue
+		}
+		if len(k.Architectures) != 0 && !slices.Contains(k.Architectures, arch) {
+			continue
+		}
+		name := filepath.Base(k.URL)
+		if prev, ok := byName[name]; ok && prev != k.URL {
+			prevContent, prevEmbedded := out.embedded[prev]
+			if !prevEmbedded || string(prevContent) != k.Content {
+				return lockKeys{}, fmt.Errorf("keyring entries %s and %s would both be installed as %s", prev, k.URL, "/etc/apk/keys/"+name)
+			}
+			continue
+		}
+		byName[name] = k.URL
+		out.embedded[k.URL] = []byte(k.Content)
 	}
-	return keys, remaining, nil
+
+	if len(out.remaining) > 0 {
+		if requireEmbedded {
+			return lockKeys{}, fmt.Errorf("keyring entries have no content embedded in the lock file (regenerate the lock file): %s", strings.Join(out.remaining, ", "))
+		}
+		log.Warnf("%d keyring entries have no content embedded in the lock file and are fetched instead; regenerate the lock file: %s", len(out.remaining), strings.Join(out.remaining, ", "))
+	}
+	if len(undiscovered) > 0 {
+		if requireEmbedded {
+			return lockKeys{}, fmt.Errorf("lock file embeds keyring entries that are neither configured nor recorded as discovered for a repository (regenerate the lock file): %s", strings.Join(undiscovered, ", "))
+		}
+		log.Warnf("lock file embeds keyring entries that are neither configured nor recorded as discovered for a repository, so keys are discovered live instead; regenerate the lock file: %s", strings.Join(undiscovered, ", "))
+		out.discover = true
+	}
+	return out, nil
+}
+
+// chainguardKeyRepositories returns the repositories of repos under which
+// keyURL is a Chainguard-style discovered key URL, "<repository>/<key>".
+func chainguardKeyRepositories(keyURL string, repos []string) []string {
+	var out []string
+	for _, r := range repos {
+		if !strings.HasPrefix(r, "https://") && !strings.HasPrefix(r, "http://") {
+			continue
+		}
+		name, ok := strings.CutPrefix(keyURL, strings.TrimSuffix(r, "/")+"/")
+		if ok && name != "" && !strings.Contains(name, "/") {
+			out = append(out, r)
+		}
+	}
+	return out
 }
