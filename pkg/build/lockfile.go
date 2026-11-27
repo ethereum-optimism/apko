@@ -80,6 +80,7 @@ func GenerateLock(ctx context.Context, archs []types.Architecture, opts []Option
 			Name:         o.ImageConfigFile,
 			DeepChecksum: o.ImageConfigChecksum,
 		},
+		UnverifiedIndexes: o.IgnoreSignatures,
 		Contents: pkglock.LockContents{
 			Packages:                make([]pkglock.LockPkg, 0, len(ic.Contents.Packages)),
 			BuildRepositories:       make([]pkglock.LockRepo, 0, len(ic.Contents.BuildRepositories)),
@@ -103,7 +104,7 @@ func GenerateLock(ctx context.Context, archs []types.Architecture, opts []Option
 	}
 
 	// Discover and add auto-discovered keys from repositories
-	discoveredKeys, err := discoverKeysForLock(ctx, ic, archs)
+	discoveredKeys, err := discoverKeysForLock(ctx, ic, o, archs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover keys: %w", err)
 	}
@@ -155,6 +156,8 @@ func GenerateLock(ctx context.Context, archs []types.Architecture, opts []Option
 			}
 			if len(rpkg.FileHash) != 0 {
 				lockPkg.SHA256 = pkglock.FormatSHA256(rpkg.FileHash)
+			} else if !isLocalPackageURL(lockPkg.URL) {
+				return nil, fmt.Errorf("no sha256 could be computed for %s-%s (%s) from %s", lockPkg.Name, lockPkg.Version, lockPkg.Architecture, lockPkg.URL)
 			}
 
 			if rpkg.SignatureSize != 0 {
@@ -243,7 +246,7 @@ func loadKeyringBytes(ctx context.Context, client *http.Client, keyring string) 
 }
 
 // discoverKeysForLock discovers keys from repositories and returns them as LockKeyring entries
-func discoverKeysForLock(ctx context.Context, ic *types.ImageConfiguration, archs []types.Architecture) ([]pkglock.LockKeyring, error) {
+func discoverKeysForLock(ctx context.Context, ic *types.ImageConfiguration, o *options.Options, archs []types.Architecture) ([]pkglock.LockKeyring, error) {
 	log := clog.FromContext(ctx)
 
 	// Collect all unique repositories
@@ -257,9 +260,16 @@ func discoverKeysForLock(ctx context.Context, ic *types.ImageConfiguration, arch
 	for _, repo := range ic.Contents.Repositories {
 		repoSet[repo] = struct{}{}
 	}
+	for _, repo := range o.ExtraBuildRepos {
+		repoSet[repo] = struct{}{}
+	}
+	for _, repo := range o.ExtraRepos {
+		repoSet[repo] = struct{}{}
+	}
 
 	// Map to track discovered keys by URL to avoid duplicates
 	discoveredKeyMap := make(map[string]pkglock.LockKeyring)
+	allArchs := sets.New[string]()
 
 	// Fetch Alpine releases once (cached by HTTP client)
 	client := &http.Client{}
@@ -295,18 +305,18 @@ func discoverKeysForLock(ctx context.Context, ic *types.ImageConfiguration, arch
 
 				// Fetch and embed each key's bytes.
 				for _, u := range urls {
-					if _, ok := discoveredKeyMap[u]; ok {
-						continue
+					if _, ok := discoveredKeyMap[u]; !ok {
+						b, err := apk.FetchKeyBytes(ctx, client, nil, u)
+						if err != nil {
+							return nil, fmt.Errorf("failed to fetch alpine key %s: %w", u, err)
+						}
+						discoveredKeyMap[u] = pkglock.LockKeyring{
+							Name:    stripURLScheme(u),
+							URL:     u,
+							Content: string(b),
+						}
 					}
-					b, err := apk.FetchKeyBytes(ctx, client, nil, u)
-					if err != nil {
-						return nil, fmt.Errorf("failed to fetch alpine key %s: %w", u, err)
-					}
-					discoveredKeyMap[u] = pkglock.LockKeyring{
-						Name:    stripURLScheme(u),
-						URL:     u,
-						Content: string(b),
-					}
+					addDiscovery(discoveredKeyMap, u, repo, arch.ToAPK())
 				}
 			}
 		}
@@ -327,18 +337,34 @@ func discoverKeysForLock(ctx context.Context, ic *types.ImageConfiguration, arch
 					URL:     keyURL,
 					Content: string(key.Bytes),
 				}
+				allArchs.Insert(keyURL)
+				addDiscovery(discoveredKeyMap, keyURL, repo, "")
 			}
 		}
 	}
 
 	// Convert map to slice
 	discoveredKeys := make([]pkglock.LockKeyring, 0, len(discoveredKeyMap))
-	for _, key := range discoveredKeyMap {
+	for u, key := range discoveredKeyMap {
+		if allArchs.Has(u) {
+			key.Architectures = nil
+		}
 		discoveredKeys = append(discoveredKeys, key)
 	}
 
 	log.Infof("Discovered %d auto-discovered keys", len(discoveredKeys))
 	return discoveredKeys, nil
+}
+
+// addDiscovery records that the key at keyURL was discovered for repo and,
+// unless arch is empty, for arch.
+func addDiscovery(keys map[string]pkglock.LockKeyring, keyURL, repo, arch string) {
+	k := keys[keyURL]
+	k.DiscoveredFor = sets.List(sets.New(k.DiscoveredFor...).Insert(repo))
+	if arch != "" {
+		k.Architectures = sets.List(sets.New(k.Architectures...).Insert(arch))
+	}
+	keys[keyURL] = k
 }
 
 // RemoveRepositoryLabel strips any leading "@label " prefixes from a repository.
