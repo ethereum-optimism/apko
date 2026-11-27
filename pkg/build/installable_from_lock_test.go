@@ -491,6 +491,8 @@ func TestLockedKeys(t *testing.T) {
 	const arm64Only = "https://alpine.example/keys/arm.rsa.pub"
 	const runtimeOnly = runtimeRepo + "/r.rsa.pub"
 	const sameAsA = repo + "/a.rsa.pub"
+	const unlockedRepo = "https://unlocked.example/os"
+	const legacy = "https://alpine.example/keys/x.rsa.pub"
 	base := []lock.LockKeyring{
 		{URL: keyA, Content: "A"},
 		{URL: "https://keys.example/empty.rsa.pub"},
@@ -506,10 +508,11 @@ func TestLockedKeys(t *testing.T) {
 		name          string
 		keyrings      []lock.LockKeyring
 		keyring       []string
+		repos         []string
 		require       bool
 		wantEmbedded  []string
 		wantRemaining []string
-		wantDiscover  bool
+		wantDiscover  []string
 		wantErr       string
 	}{{
 		name:         "configured, appended and discovered keys embedded",
@@ -577,16 +580,46 @@ func TestLockedKeys(t *testing.T) {
 		require:  true,
 		wantErr:  "neither configured nor recorded as discovered for a repository",
 	}, {
-		name:         "key of an older lock that cannot be matched is discovered live otherwise",
-		keyrings:     with(lock.LockKeyring{URL: "https://alpine.example/keys/x.rsa.pub", Content: "X"}),
+		name:         "key of an older lock that cannot be matched leaves locked repositories alone",
+		keyrings:     with(lock.LockKeyring{URL: legacy, Content: "X"}),
 		keyring:      []string{keyA},
 		wantEmbedded: []string{keyA, discovered},
-		wantDiscover: true,
+	}, {
+		name:         "key of an older lock that cannot be matched discovers repositories without a locked key",
+		keyrings:     with(lock.LockKeyring{URL: legacy, Content: "X"}),
+		keyring:      []string{keyA},
+		repos:        []string{repo, unlockedRepo},
+		wantEmbedded: []string{keyA, discovered},
+		wantDiscover: []string{unlockedRepo},
+	}, {
+		name:         "key of an older lock that cannot be matched discovers when no repository has a locked key",
+		keyrings:     []lock.LockKeyring{{URL: keyA, Content: "A"}, {URL: legacy, Content: "X"}},
+		keyring:      []string{keyA},
+		repos:        []string{repo, unlockedRepo},
+		wantEmbedded: []string{keyA},
+		wantDiscover: []string{repo, unlockedRepo},
+	}, {
+		name:     "key of an older lock that cannot be matched fails when required with other repositories",
+		keyrings: with(lock.LockKeyring{URL: legacy, Content: "X"}),
+		keyring:  []string{keyA},
+		repos:    []string{repo, unlockedRepo},
+		require:  true,
+		wantErr:  "neither configured nor recorded as discovered for a repository",
+	}, {
+		name:         "repository without a locked key is not discovered when the lock has no older keys",
+		keyrings:     base,
+		keyring:      []string{keyA},
+		repos:        []string{repo, unlockedRepo},
+		wantEmbedded: []string{keyA, discovered},
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			l := lock.Lock{Contents: lock.LockContents{Keyrings: tt.keyrings}}
-			got, err := lockedKeys(t.Context(), l, tt.keyring, []string{repo}, "x86_64", tt.require)
+			repos := tt.repos
+			if repos == nil {
+				repos = []string{repo}
+			}
+			got, err := lockedKeys(t.Context(), l, tt.keyring, repos, "x86_64", tt.require)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 				return

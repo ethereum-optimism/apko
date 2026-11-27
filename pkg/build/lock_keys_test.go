@@ -99,6 +99,7 @@ func TestBuildFromLockKeyDiscovery(t *testing.T) {
 	tests := []struct {
 		name       string
 		discovered lock.LockKeyring
+		extra      []lock.LockKeyring
 		unverified bool
 		strict     bool
 		wantErr    string
@@ -110,6 +111,10 @@ func TestBuildFromLockKeyDiscovery(t *testing.T) {
 		name:       "discovered key recorded by an older lock",
 		discovered: lock.LockKeyring{URL: repoURL + "/" + keyFile, Content: lockedDiscovered},
 		strict:     true,
+	}, {
+		name:       "older key that matches no repository",
+		discovered: lock.LockKeyring{URL: repoURL + "/" + keyFile, Content: lockedDiscovered, DiscoveredFor: []string{repoURL}},
+		extra:      []lock.LockKeyring{{URL: "https://alpine.example/keys/legacy.rsa.pub", Content: lockedDiscovered}},
 	}, {
 		name:       "lock generated without signature verification with strong checksums required",
 		discovered: lock.LockKeyring{URL: repoURL + "/" + keyFile, Content: lockedDiscovered, DiscoveredFor: []string{repoURL}},
@@ -124,7 +129,7 @@ func TestBuildFromLockKeyDiscovery(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			l := lock.Lock{Version: "v1", UnverifiedIndexes: tt.unverified, Contents: lock.LockContents{
-				Keyrings: []lock.LockKeyring{configured, tt.discovered},
+				Keyrings: append([]lock.LockKeyring{configured, tt.discovered}, tt.extra...),
 				Packages: pkgs,
 			}}
 			ic := types.ImageConfiguration{

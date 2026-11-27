@@ -20,6 +20,9 @@ import (
 	"cmp"
 	"context"
 	"crypto"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +69,24 @@ type cacheKey struct {
 	url     string
 	etag    string    // Only used for remote indexes.
 	modtime time.Time // Only used for local indexes.
+	// trust identifies how the index was verified: unverified, or by a digest
+	// of the keyring its signature was checked against.
+	trust string
+}
+
+// indexTrust returns the cacheKey trust for parsing index u with keys and opts.
+func indexTrust(u, arch string, keys map[string][]byte, opts *indexOpts) string {
+	if !shouldCheckSignatureForIndex(u, arch, opts) {
+		return "unverified"
+	}
+	h := sha256.New()
+	for _, name := range slices.Sorted(maps.Keys(keys)) {
+		for _, b := range [][]byte{[]byte(name), keys[name]} {
+			_ = binary.Write(h, binary.BigEndian, uint64(len(b)))
+			h.Write(b)
+		}
+	}
+	return "keyring:" + hex.EncodeToString(h.Sum(nil))
 }
 
 type indexCache struct {
@@ -89,6 +110,7 @@ func (i *indexCache) get(ctx context.Context, repoName, repoURL string, keys map
 
 	repoBase := fmt.Sprintf("%s/%s", repoURL, arch)
 	repoRef := Repository{URI: repoBase}
+	trust := indexTrust(u, arch, keys, opts)
 
 	if strings.HasPrefix(u, "https://") || strings.HasPrefix(u, "http://") {
 		asURL, err := url.Parse(u)
@@ -144,7 +166,7 @@ func (i *indexCache) get(ctx context.Context, repoName, repoURL string, keys map
 			return fetchAndParse(etag)
 		}
 
-		key := cacheKey{url: u, etag: etag}
+		key := cacheKey{url: u, etag: etag, trust: trust}
 		idx, hit, err := i.indexes.Do(key, func() (NamedIndex, error) {
 			return fetchAndParse(etag)
 		})
@@ -167,7 +189,7 @@ func (i *indexCache) get(ctx context.Context, repoName, repoURL string, keys map
 			return nil, fmt.Errorf("stat: %w", err)
 		}
 
-		key := cacheKey{url: u, modtime: stat.ModTime()}
+		key := cacheKey{url: u, modtime: stat.ModTime(), trust: trust}
 
 		idx, hit, err := i.indexes.Do(key, func() (NamedIndex, error) {
 			b, err := os.ReadFile(u)
