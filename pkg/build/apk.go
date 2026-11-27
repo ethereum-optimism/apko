@@ -73,9 +73,7 @@ func (bc *Context) initializeApk(ctx context.Context) error {
 			return fmt.Errorf("failed to initialize apk keyring from lockfile: %w", err)
 		}
 		embeddedKeys, keyring = lk.embedded, lk.remaining
-		if !lk.discover {
-			discoverRepos = nil
-		}
+		discoverRepos = lk.discover
 	}
 
 	if err := bc.apk.InitDB(ctx, discoverRepos...); err != nil {
@@ -136,9 +134,9 @@ type lockKeys struct {
 	embedded map[string][]byte
 	// remaining are the configured keys that have to be fetched.
 	remaining []string
-	// discover is set when the keys of the build repositories have to be
-	// discovered live because the lock does not record them.
-	discover bool
+	// discover are the build repositories whose keys have to be discovered
+	// live because the lock does not record them.
+	discover []string
 }
 
 // lockKeyring loads the lockfile, checks that its repository indexes were
@@ -179,7 +177,8 @@ func checkLockVerified(ctx context.Context, l lock.Lock, file string, requireVer
 // without recording what they were discovered for are matched to the build
 // repositories by their Chainguard-style discovery URL; when one cannot be
 // matched, it is an error when requireEmbedded is set, and otherwise the keys
-// are discovered live, as without a lock. Two keyring entries that would be written to the same
+// of the build repositories that have no discovered key in the lock are
+// discovered live. Two keyring entries that would be written to the same
 // keyring file are an error when either of them is embedded, unless both are
 // embedded with the same content and one of them is discovered.
 func lockedKeys(ctx context.Context, l lock.Lock, keyring, buildRepos []string, arch string, requireEmbedded bool) (lockKeys, error) {
@@ -220,6 +219,7 @@ func lockedKeys(ctx context.Context, l lock.Lock, keyring, buildRepos []string, 
 	}
 
 	repos := sets.New(buildRepos...)
+	locked := sets.New[string]()
 	var undiscovered []string
 	for _, k := range l.Contents.Keyrings {
 		if k.Content == "" || configured.Has(k.URL) {
@@ -237,6 +237,11 @@ func lockedKeys(ctx context.Context, l lock.Lock, keyring, buildRepos []string, 
 		}
 		if len(k.Architectures) != 0 && !slices.Contains(k.Architectures, arch) {
 			continue
+		}
+		for _, r := range discoveredFor {
+			if repos.Has(r) {
+				locked.Insert(r)
+			}
 		}
 		name := filepath.Base(k.URL)
 		if prev, ok := byName[name]; ok && prev != k.URL {
@@ -260,8 +265,16 @@ func lockedKeys(ctx context.Context, l lock.Lock, keyring, buildRepos []string, 
 		if requireEmbedded {
 			return lockKeys{}, fmt.Errorf("lock file embeds keyring entries that are neither configured nor recorded as discovered for a repository (regenerate the lock file): %s", strings.Join(undiscovered, ", "))
 		}
-		log.Warnf("lock file embeds keyring entries that are neither configured nor recorded as discovered for a repository, so keys are discovered live instead; regenerate the lock file: %s", strings.Join(undiscovered, ", "))
-		out.discover = true
+		for _, r := range buildRepos {
+			if !locked.Has(r) {
+				out.discover = append(out.discover, r)
+			}
+		}
+		if len(out.discover) > 0 {
+			log.Warnf("KEYS NOT FROM LOCK: discovering keys live for %d build repositories with no discovered key in the lock file, because it embeds keyring entries that are neither configured nor recorded as discovered for a repository (%s); regenerate the lock file. Repositories: %s", len(out.discover), strings.Join(undiscovered, ", "), strings.Join(out.discover, ", "))
+		} else {
+			log.Warnf("lock file embeds keyring entries that are neither configured nor recorded as discovered for a repository, which are ignored; regenerate the lock file: %s", strings.Join(undiscovered, ", "))
+		}
 	}
 	return out, nil
 }
