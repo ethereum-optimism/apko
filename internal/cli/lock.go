@@ -93,7 +93,7 @@ func lockInternal(cmdName string, extension string, deprecated string) *cobra.Co
 	cmd.Flags().StringSliceVar(&includePaths, "include-paths", []string{}, "Additional include paths where to look for input files (config, base image, etc.). By default apko will search for paths only in workdir. Include paths may be absolute, or relative. Relative paths are interpreted relative to workdir. For adding extra paths for packages, use --repository-append")
 	cmd.Flags().BoolVar(&ignoreSignatures, "ignore-signatures", false, "ignore repository signature verification")
 	cmd.Flags().StringVar(&cacheDir, "cache-dir", "", "directory to use for caching apk packages and indexes (default '' means to use system-defined cache directory)")
-	cmd.Flags().BoolVar(&markLocal, "mark-local-packages", false, "record packages from local (non-http) repositories as local entries with name, version and architecture only; builds then require --local-package digests for them")
+	cmd.Flags().BoolVar(&markLocal, "mark-local-packages", false, "record packages from local (non-http) repositories as local entries with name, version and architecture only; builds then require --local-package digests for them. Local key files passed with --keyring-append are not embedded")
 
 	return cmd
 }
