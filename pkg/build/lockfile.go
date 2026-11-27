@@ -218,9 +218,17 @@ func repoLock(repositoryURI string, arch types.Architecture) (pkglock.LockRepo, 
 }
 
 // lockedKeyring returns the keyring entries whose content the lock embeds: the
-// configured keyring and the keys appended with --keyring-append.
+// configured keyring and the keys appended with --keyring-append. With
+// MarkLocalPackages, appended keys that are local files are left out.
 func lockedKeyring(ic *types.ImageConfiguration, o *options.Options) []string {
-	return sets.List(sets.New(ic.Contents.Keyring...).Insert(o.ExtraKeyFiles...))
+	keys := sets.New(ic.Contents.Keyring...)
+	for _, k := range o.ExtraKeyFiles {
+		if o.MarkLocalPackages && isLocalPackageURL(k) {
+			continue
+		}
+		keys.Insert(k)
+	}
+	return sets.List(keys)
 }
 
 func isLocalPackageURL(u string) bool {

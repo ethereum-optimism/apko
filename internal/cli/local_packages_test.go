@@ -102,3 +102,57 @@ func TestLockAndBuildLocalPackages(t *testing.T) {
 		})
 	}
 }
+
+func TestLockLocalPackagesOmitsAppendedLocalKeys(t *testing.T) {
+	ctx := t.Context()
+	archs := types.ParseArchitectures([]string{"amd64", "arm64"})
+	key := filepath.Join("testdata", "melange.rsa.pub")
+
+	lockPath := filepath.Join(t.TempDir(), "apko.lock.json")
+	require.NoError(t, cli.LockCmd(ctx, lockPath, archs, withIsolatedDirs(t,
+		build.WithConfig("apko-local-keyring-append.yaml", []string{"testdata"}),
+		build.WithExtraKeys([]string{key}),
+		build.WithMarkLocalPackages(true),
+	)))
+
+	l, err := lock.FromFile(lockPath)
+	require.NoError(t, err)
+	for _, k := range l.Contents.Keyrings {
+		require.NotEqual(t, key, k.URL, "appended local key embedded in the lock")
+	}
+
+	out := filepath.Join(t.TempDir(), "image.tar")
+	require.NoError(t, cli.BuildCmd(ctx, "local:test", out, archs, []string{"local:test"}, false, "",
+		withIsolatedDirs(t,
+			build.WithConfig("apko-local-keyring-append.yaml", []string{"testdata"}),
+			build.WithLockFile(lockPath),
+			build.WithLocalPackages([]string{
+				localPackageFlag(t, "x86_64", "pretend-baselayout"),
+				localPackageFlag(t, "x86_64", "replayout"),
+				localPackageFlag(t, "aarch64", "pretend-baselayout"),
+				localPackageFlag(t, "aarch64", "replayout"),
+			}),
+			build.WithRequireStrongChecksums(true),
+		)...))
+	require.FileExists(t, out)
+}
+
+func TestLockWithoutLocalPackagesKeepsAppendedKeys(t *testing.T) {
+	ctx := t.Context()
+	archs := types.ParseArchitectures([]string{"amd64"})
+	key := filepath.Join("testdata", "melange.rsa.pub")
+
+	lockPath := filepath.Join(t.TempDir(), "apko.lock.json")
+	require.NoError(t, cli.LockCmd(ctx, lockPath, archs, withIsolatedDirs(t,
+		build.WithConfig("apko-local-keyring-append.yaml", []string{"testdata"}),
+		build.WithExtraKeys([]string{key}),
+	)))
+
+	l, err := lock.FromFile(lockPath)
+	require.NoError(t, err)
+	var urls []string
+	for _, k := range l.Contents.Keyrings {
+		urls = append(urls, k.URL)
+	}
+	require.Contains(t, urls, key)
+}
